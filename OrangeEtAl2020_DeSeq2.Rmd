@@ -1,0 +1,619 @@
+---
+title: "Orange et al 2020 - with DESEQ2"
+output: html_notebook
+---
+
+#prepare data
+
+```{r}
+#Load Libraries Required for Analysis
+library(biomaRt)
+library(pheatmap)
+library(ggplot2)
+library(ggrepel)
+library(scales)
+library(ImpulseDE2)
+
+#Jack filtered the readcounts for douplicated, swaped the geneID with gene names
+setwd('C:/Users/Domenico/Downloads/')
+rawcountsnodups = read.csv('rawcountsannotatedbygene (1).csv', sep=",")
+rownames(rawcountsnodups) <- rawcountsnodups$X
+rawcountsnodups$X <- NULL
+head(rawcountsnodups)
+```
+
+# prepare metadata
+
+```{r}
+#Now Time to Filter Metadata and Counts for Samples we are interested in
+#Load in Updated Metadata
+metadata<-read.csv('Filtered Metadata with TTF DOR0833.1.csv')
+
+#Subset only Samples for which we have timepoint to flare info
+timepoints_to_keep <- c('0',  '1',  '2',  '3',  '4', '-8', '-7', '-6', '-4', '-3', '-2', '-1', '-5')
+final_metadata <- metadata[metadata$Weeks.to.Flare %in% timepoints_to_keep, ]
+head(final_metadata)
+nrow(final_metadata)
+final_metadata$Sample.Name <- gsub("-", ".", final_metadata$Sample.Name)
+final_metadata$Sample.Name
+```
+
+```{r}
+samples_to_remove <- c("FS.184", "FS.3053", "FS.3054", "FS.3055", 'FS.795')
+
+for (s in samples_to_remove){
+  print(s %in% final_metadata$Sample.Name)
+  print(s %in% colnames(rawcountsnodups))
+}
+```
+
+
+```{r}
+#Remove These Samples as not in Counts Matrix
+#Create Notin Function
+`%notin%` <- Negate(`%in%`)
+
+final_metadata <- final_metadata[final_metadata$Sample.Name %notin% samples_to_remove, ]
+nrow(final_metadata)
+
+ncol(rawcountsnodups)
+rawcountsnodups.final <- rawcountsnodups[, colnames(rawcountsnodups) %notin% samples_to_remove]
+rawcountsnodups.final <- rawcountsnodups.final[, colnames(rawcountsnodups.final) %in% final_metadata$Sample.Name]
+ncol(rawcountsnodups.final)
+rawcountsnodups.final <-round(rawcountsnodups.final)
+head(rawcountsnodups.final)
+```
+
+```{r}
+write.csv(final_metadata, "good_metadata.csv")
+write.csv(rawcountsnodups.final, "finalcounts_rounded.csv")
+```
+
+```{r}
+library(DESeq2)
+dds <- DESeqDataSetFromMatrix(countData = rawcountsnodups.final,
+                              colData = final_metadata,
+                              design = ~ Disease.Stage.Condition)
+                              #design = ~ Weeks.to.Flare)
+```
+
+```{r}
+#estimate dispersion trend and apply a variance stabilizing transformation
+rld <- vst(dds)
+x <- assay(rld) 
+```
+
+```{r}
+pca <- prcomp(t(x))
+summary(pca)
+```
+
+```{r}
+final_metadata$Weeks.to.Flare <- as.factor(final_metadata$Weeks.to.Flare)
+```
+
+## Check PCA
+
+```{r, fig.width=10}
+library(PCAtools)
+
+#Prepare the data:
+data2 <- final_metadata
+rownames(data2) <- final_metadata$Sample.Name
+data2$Name <- NULL
+data2 <- data2[colnames(assay(rld)),]
+
+all(colnames(assay(rld)) == rownames(data2)) #Check returns true
+
+#Plot it:
+p <- pca(assay(rld), metadata = data2, removeVar = 0.1)
+biplot(p)
+for (n in colnames(data2)) {
+  print(biplot(p, colby = n, legendPosition = 'right'))
+}
+
+```
+
+## SVA/ Combat
+
+```{r}
+library(sva)
+```
+
+```{r}
+mod = model.matrix(~Flare..+Weeks.to.Flare, data=model.frame(data2))
+mod
+mod0 = model.matrix(~Flare.., data=model.frame(data2))
+mod0
+mod1 = model.matrix(~Weeks.to.Flare, data=model.frame(data2))
+mod1
+```
+
+```{r}
+n.sv = sva::num.sv(assay(rld), mod, method="leek")
+n.sv
+```
+
+```{r}
+svobj = sva(assay(rld), mod, mod0, n.sv=n.sv)
+```
+
+```{r}
+model.data2 = model.frame(data2)
+model.data2$Flare..
+
+ComBat.adjusted = ComBat(
+  assay(rld),
+  batch=model.data2$Flare..,
+  mod = mod1,
+  par.prior = TRUE,
+  prior.plots = FALSE,
+  mean.only = FALSE,
+  ref.batch = NULL,
+  BPPARAM = bpparam("SerialParam")
+)
+```
+
+```{r, fig.width=10}
+#Plot it:
+p2 <- pca(ComBat.adjusted, metadata = data2, removeVar = 0.1)
+biplot(p2)
+for (n in colnames(data2)) {
+  print(biplot(p2, colby = n, legendPosition = 'right'))
+  }
+```
+
+```{r}
+write.csv(ComBat.adjusted, "combat.Flare.adjusted.csv")
+write.csv(model.data2, "metadata_combat.csv")
+```
+
+#metadata v2
+
+```{r}
+#Now Time to Filter Metadata and Counts for Samples we are interested in
+#Load in Updated Metadata
+metadata<-read.csv('Batch_Filtered Metadata with TTF DOR0833.1.csv')
+
+#Subset only Samples for which we have timepoint to flare info
+timepoints_to_keep <- c('0',  '1',  '2',  '3',  '4', '-8', '-7', '-6', '-4', '-3', '-2', '-1', '-5')
+final_metadata <- metadata[metadata$Weeks.to.Flare %in% timepoints_to_keep, ]
+head(final_metadata)
+nrow(final_metadata)
+final_metadata$Sample.Name <- gsub("-", ".", final_metadata$Sample.Name)
+final_metadata$Sample.Name
+```
+
+```{r}
+samples_to_remove <- c("FS.184", "FS.3053", "FS.3054", "FS.3055", 'FS.795')
+
+for (s in samples_to_remove){
+  print(s %in% final_metadata$Sample.Name)
+  print(s %in% colnames(rawcountsnodups))
+}
+```
+
+
+```{r}
+#Remove These Samples as not in Counts Matrix
+#Create Notin Function
+`%notin%` <- Negate(`%in%`)
+
+final_metadata <- final_metadata[final_metadata$Sample.Name %notin% samples_to_remove, ]
+nrow(final_metadata)
+
+ncol(rawcountsnodups)
+rawcountsnodups.final <- rawcountsnodups[, colnames(rawcountsnodups) %notin% samples_to_remove]
+rawcountsnodups.final <- rawcountsnodups.final[, colnames(rawcountsnodups.final) %in% final_metadata$Sample.Name]
+ncol(rawcountsnodups.final)
+rawcountsnodups.final <-round(rawcountsnodups.final)
+head(rawcountsnodups.final)
+```
+
+```{r}
+write.csv(final_metadata, "good_metadata.csv")
+write.csv(rawcountsnodups.final, "finalcounts_rounded.csv")
+```
+
+```{r}
+rawcountsnodups.final <- read.csv("finalcounts_rounded.csv", row.names = 1)
+head(rawcountsnodups.final)
+final_metadata <- read.csv("good_metadata.csv", row.names = 2)
+final_metadata
+```
+
+
+```{r}
+library(DESeq2)
+dds <- DESeqDataSetFromMatrix(countData = rawcountsnodups.final,
+                              colData = final_metadata,
+                              design = ~ Disease.Stage.Condition)
+                              #design = ~ Weeks.to.Flare)
+```
+
+```{r}
+#estimate dispersion trend and apply a variance stabilizing transformation
+rld <- vst(dds)
+x <- assay(rld) 
+```
+
+```{r}
+pca <- prcomp(t(x))
+summary(pca)
+```
+
+```{r}
+final_metadata$Weeks.to.Flare <- as.factor(final_metadata$Weeks.to.Flare)
+```
+
+## Check PCA
+
+```{r, fig.width=10}
+library(PCAtools)
+
+#Prepare the data:
+data2 <- final_metadata
+rownames(data2) <- final_metadata$Sample.Name
+data2$Name <- NULL
+data2 <- data2[colnames(assay(rld)),]
+
+all(colnames(assay(rld)) == rownames(data2)) #Check returns true
+
+#Plot it:
+p <- pca(assay(rld), metadata = data2, removeVar = 0.1)
+biplot(p)
+for (n in colnames(data2)) {
+  print(biplot(p, colby = n, legendPosition = 'right'))
+}
+
+```
+
+## SVA/ Combat
+
+```{r}
+library(sva)
+```
+
+```{r}
+mod = model.matrix(~Flare..+Weeks.to.Flare+Batch, data=model.frame(data2))
+mod0 = model.matrix(~Flare.., data=model.frame(data2))
+mod1 = model.matrix(~Weeks.to.Flare, data=model.frame(data2))
+```
+
+```{r}
+model.data2 = model.frame(data2)
+model.data2$Batch
+
+ComBat.adjusted = ComBat(
+  assay(rld),
+  batch=model.data2$Batch,
+  mod = mod1,
+  par.prior = TRUE,
+  prior.plots = FALSE,
+  mean.only = FALSE,
+  ref.batch = NULL,
+  BPPARAM = bpparam("SerialParam")
+)
+```
+
+```{r, fig.width=10}
+#Plot it:
+p2 <- pca(ComBat.adjusted, metadata = data2, removeVar = 0.1)
+biplot(p2)
+for (n in colnames(data2)) {
+  print(biplot(p2, colby = n, legendPosition = 'right'))
+  }
+```
+
+```{r}
+write.csv(ComBat.adjusted, "Batch_combat.Flare.adjusted.csv")
+write.csv(model.data2, "Batch_metadata_combat.csv")
+```
+
+# Batch and flare
+
+```{r}
+model.data3 = model.frame(data2)
+model.data3$Batch_Flare = paste(model.data2$Batch, model.data2$Flare.., sep = "_")
+head(model.data3)
+model.data3
+```
+
+```{r, fig.width=10}
+#Plot it:
+p2 <- pca(assay(rld), metadata = model.data3, removeVar = 0.1)
+biplot(p2)
+for (n in colnames(model.data3)) {
+  print(biplot(p2, colby = n, legendPosition = 'right'))
+  }
+```
+## Combat
+
+```{r}
+ComBat.adjusted = ComBat(
+  assay(rld),
+  batch=model.data3$Batch_Flare,
+  mod = mod1,
+  par.prior = TRUE,
+  prior.plots = FALSE,
+  mean.only = FALSE,
+  ref.batch = NULL,
+  BPPARAM = bpparam("SerialParam")
+)
+```
+
+```{r, fig.width=10}
+#Plot it:
+p2 <- pca(ComBat.adjusted, metadata = model.data3, removeVar = 0.1)
+biplot(p2)
+for (n in colnames(model.data3)) {
+  print(biplot(p2, colby = n, legendPosition = 'right'))
+  }
+```
+
+```{r}
+write.csv(ComBat.adjusted, "Batch_Flare_combat.adjusted.csv")
+write.csv(model.data3, "Batch_Flare_metadata_combat.csv")
+```
+
+#DE flare
+
+```{r}
+head(new.meta)
+```
+
+
+```{r}
+library(DESeq2)
+dds <- DESeqDataSetFromMatrix(countData = rawcountsnodups.final,
+                              colData = new.meta,
+                              design = ~ FlareBatch + Disease.Stage.Condition)
+                              #design = ~ Batch + Condition
+```
+
+```{r}
+#remove 0s genes
+nrow(dds)
+dds <- dds[ rowSums(counts(dds)) > 1, ]
+nrow(dds)
+```
+
+```{r}
+#transform
+vsd <- vst(dds, blind = FALSE)
+head(assay(vsd), 3)
+```
+
+```{r}
+sampleDists <- dist(t(assay(vsd)))
+```
+
+```{r}
+library(pheatmap)
+library(RColorBrewer)
+```
+
+```{r, fig.width=15}
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(vsd$Flare.., vsd$Disease.Stage.Condition, sep = "-")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+```
+
+```{r}
+plotPCA(vsd, intgroup = c("FlareBatch", "Disease.Stage.Condition"))
+plotPCA(vsd, intgroup = "Disease.Stage.Condition")
+plotPCA(vsd, intgroup = "FlareBatch")
+```
+
+```{r}
+library(magrittr)
+mds <- as.data.frame(colData(vsd))  %>%
+         cbind(cmdscale(sampleDistMatrix))
+ggplot(mds, aes(x = `1`, y = `2`, color = Flare.., shape = Disease.Stage.Condition)) +
+  geom_point(size = 3) + coord_fixed()
+```
+
+```{r}
+dds <-DESeq(dds)
+```
+
+```{r}
+resultsNames(dds)
+```
+
+```{r}
+#Extract results
+Flare.vs.Baseline <- results(dds, contrast = c("Disease.Stage.Condition","Flare","Baseline") ,alpha=0.05)
+summary(Flare.vs.Baseline) #for each res
+
+#histogram
+hist(Flare.vs.Baseline$pvalue[Flare.vs.Baseline$baseMean > 1], breaks = 0:20/20, col = "grey50", border = "white") #for each res
+table(Flare.vs.Baseline$padj < 0.05) #summarize in table
+DEgenes = subset(Flare.vs.Baseline, padj < 0.05)
+```
+
+```{r}
+intersect(rownames(DEgenes), signature)
+
+setdiff(signature, rownames(DEgenes))
+```
+
+#DE weeks
+
+```{r}
+new.meta = read.csv("Batch_Flare_metadata_combat_newNames.csv")
+rownames(new.meta) <- new.meta$X
+new.meta$X <- NULL
+new.meta
+```
+
+```{r}
+table(new.meta$Weeks.to.Flare)
+```
+
+```{r}
+library(limma)
+comp.groups <- makeContrasts(minus2 - two, levels = new.meta$Weeks.to.Flare)
+```
+
+```{r}
+colnames(rawcountsnodups.final)
+rownames(new.meta)
+new.meta = new.meta[colnames(rawcountsnodups.final),]
+
+new.meta$FlareBatch
+```
+
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = rawcountsnodups.final,
+                              colData = new.meta,
+                              design = ~ FlareBatch + Weeks.to.Flare)
+                              #design = ~ Batch + Condition
+```
+
+```{r}
+design = model.matrix(~ FlareBatch + Weeks.to.Flare, new.meta)
+head(design)
+```
+
+```{r}
+#remove 0s genes
+nrow(dds)
+dds <- dds[ rowSums(counts(dds)) > 1, ]
+nrow(dds)
+```
+
+```{r}
+#transform
+vsd <- vst(dds, blind = FALSE)
+head(assay(vsd), 3)
+```
+
+```{r}
+dds <-DESeq(dds)
+```
+
+```{r}
+resultsNames(dds)
+```
+
+```{r}
+signature = c("S100A12","QPCT","F13A1","S100A9","CLEC4E","TLR2","MGST1","CD14","RNASE2","CD163","CD36","ITGAM","BIN2","CX3CR1","CD63","FCN1","CD9","CTSD","ITGB2","LGALS3","SNCA","LAMP1","JUN","NKG7")
+```
+
+## -2 vs 2
+
+```{r}
+#Extract results
+Flare.vs.Baseline <- results(dds, contrast = c("Weeks.to.Flare","minus2","two") ,alpha=0.05)
+summary(Flare.vs.Baseline) #for each res
+
+#histogram
+hist(Flare.vs.Baseline$pvalue[Flare.vs.Baseline$baseMean > 1], breaks = 0:20/20, col = "grey50", border = "white") #for each res
+table(Flare.vs.Baseline$padj < 0.05) #summarize in table
+DE.genes = subset(Flare.vs.Baseline, padj < 0.05)
+View(DE.genes)
+length(setdiff(signature, rownames(DE.genes)))
+intersect(signature, rownames(DE.genes))
+```
+
+#DE weeks (as time course)
+
+```{r}
+#Full model something like
+#full_model <- ~ genotype + treatment + time + treatment:time
+full_model <- ~ FlareBatch + Weeks.to.Flare
+full_model
+
+#To perform the LRT test, we also need to provide a reduced model, that is the full model without the treatment:time term, something like:
+#reduced_model <- ~ genotype + treatment + time
+reduced_model <- ~ FlareBatch
+reduced_model
+```
+
+re-load combat adjusted readcounts
+
+```{r}
+ComBat.adjusted <- read.csv("Batch_Flare_combat.adjusted.csv", row.names = 1)
+head(ComBat.adjusted)
+```
+
+metadata with Weeks.to.Flare as numbers
+
+```{r}
+new.meta3 = read.csv("Batch_Flare_metadata_combat_newNames_3.csv")
+rownames(new.meta3) <- new.meta3$X
+new.meta3$X <- NULL
+new.meta3
+```
+
+```{r}
+new.meta3 = new.meta3[colnames(rawcountsnodups.final2),]
+```
+
+```{r}
+library(limma)
+design <- model.matrix(full_model, new.meta3)
+View(design)
+is.fullrank(design)
+```
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = rawcountsnodups.final2, colData = new.meta3, design = ~ FlareBatch + Weeks.to.Flare)
+
+dds_lrt_time <- DESeq(dds, test="LRT", reduced = ~ FlareBatch)
+```
+
+```{r}
+resultsNames(dds_lrt_time)
+```
+
+```{r}
+library(dplyr)
+library(tibble)
+
+# Extract results
+res_LRT <- results(dds_lrt_time)
+padj.cutoff = 0.05
+
+# Subset the LRT results to return genes with padj < 0.05
+sig_res_LRT <- res_LRT %>%
+               data.frame() %>%
+               rownames_to_column(var="gene") %>% 
+               as_tibble() %>% 
+               filter(padj < padj.cutoff)
+ 
+# Get sig gene lists
+sigLRT_genes <- sig_res_LRT %>% 
+                pull(gene)
+length(sigLRT_genes)
+```
+
+```{r}
+intersect(sigLRT_genes, signature) 
+```
+
+### Search for time pattern
+
+and plot from combat adjusted
+
+```{r}
+library(DEGreport)
+# Subset results for faster cluster finding (for classroom demo purposes)
+clustering_sig_genes <- sig_res_LRT %>%
+                  arrange(padj) %>%
+                  head(n=1000)
+
+# Obtain rlog values for those significant genes
+cluster_rlog <- ComBat.adjusted[clustering_sig_genes$gene, ]
+# same order
+cluster_rlog2 <- cluster_rlog[, colnames(cluster_rlog) %in% new.meta3$Sample.Name]
+
+clusters <- degPatterns(cluster_rlog2, metadata = new.meta3, time="Days.to.Flare", col="Weeks.to.Flare")
+```

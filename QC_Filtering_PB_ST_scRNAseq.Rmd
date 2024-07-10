@@ -1,0 +1,969 @@
+
+---
+title: "Elmesmari et al. Immunity QC"
+
+---
+
+```{r}
+library(unixtools)
+set.tempdir("/datastore/Dom/temporary/")
+ulimit::memory_limit(125000)
+
+library(ggplot2)
+library(harmony)
+library(Seurat)
+library(patchwork)
+library(clustree)
+library(SeuratWrappers)
+library(Nebulosa)
+library(dplyr)
+library(DoubletFinder)
+
+source("/datastore/Dom/commonFunctions.R")
+```
+
+```{r}
+# DoubletMark <- function(Seurat.Object, sct = FALSE, num.cores = 5, prop.doublets = NULL, verbose = FALSE) {
+#   
+#   if (is.null(prop.doublets)) {
+#     #Theoretical prop.doublets calculation
+#     #from https://github.com/chris-mcginnis-ucsf/DoubletFinder/issues/76
+#     prop.doublets = ((0.4*Seurat.Object@misc$cell.recovered)/1000)/100
+#     if (verbose){
+#       print(prop.doublets)
+#     }
+#   }
+#   
+#   sweep.res <- paramSweep_v3(Seurat.Object, PCs = 1:20, sct = FALSE, num.cores = 5)
+#   sweep.stats <- summarizeSweep(sweep.res, GT = FALSE)
+#   if (verbose){
+#     print(sweep.stats)
+#   }
+# 
+#   bcmvn <- find.pK(sweep.stats)
+#   if (verbose){
+#     print(bcmvn)
+#   }
+#   
+#   ##From here:
+#   ##https://github.com/chris-mcginnis-ucsf/DoubletFinder/issues/62
+#   pK=as.numeric(as.character(bcmvn$pK))
+#   BCmetric=bcmvn$BCmetric
+#   pK_choose = pK[which(BCmetric %in% max(BCmetric))]
+#   
+#   #plot pk:
+#   #par(mar=c(5,4,4,8)+1,cex.main=1.2,font.main=2)
+#   #plot(x = pK, y = BCmetric, pch = 16,type="b", col = "blue",lty=1)
+#   #abline(v=pK_choose,lwd=2,col='red',lty=2)
+#   #title("The BCmvn distributions")
+#   #text(pK_choose,max(BCmetric),as.character(pK_choose),pos = 4,col = "red")
+#   
+#   ## Homotypic Doublet Proportion Estimate -------------------------------------------------------------------------------------
+#   annotations <- Seurat.Object@meta.data$seurat_clusters
+#   homotypic.prop <- modelHomotypic(annotations)          
+#   
+#   nExp_poi <- round(prop.doublets*nrow(Seurat.Object@meta.data))  ## Assuming prop.doublets doublet formation rate - tailor for your dataset
+#   nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+#   
+#   ## Run DoubletFinder with varying classification stringencies ----------------------------------------------------------------
+#   
+#   Seurat.Object <- doubletFinder_v3(Seurat.Object, PCs = 1:20, pK = pK_choose, nExp = nExp_poi, reuse.pANN = FALSE, sct = FALSE)
+#   #DF.cl.name = unique(colnames(Seurat.Object@meta.data))[length(colnames(Seurat.Object@meta.data))]
+#   names(Seurat.Object@meta.data)[length(colnames(Seurat.Object@meta.data))] = "Doublets Low Confidence"
+#   
+#   Seurat.Object <- doubletFinder_v3(Seurat.Object, PCs = 1:20, pK = pK_choose, nExp = nExp_poi.adj, reuse.pANN = "Doublets Low Confidence", sct = FALSE)
+#   #DF.cl.name.2 = unique(colnames(Seurat.Object@meta.data))[length(colnames(Seurat.Object@meta.data))]
+#   names(Seurat.Object@meta.data)[length(colnames(Seurat.Object@meta.data))] = "Doublets High Confidence"
+#   
+#   if (verbose){
+#     print(DimPlot(Seurat.Object, group.by = "Doublets Low Confidence"))
+#     print(DimPlot(Seurat.Object, group.by = "Doublets High Confidence"))
+#   }
+#   return(Seurat.Object)
+# }
+```
+
+#Load data
+
+1. Ambient RNA removal - SoupX
+2. Create Seurat object
+3. QC - 3 absolute median dev
+4. Doublet Removal - Doublet finder
+
+## Data generated in Oxford
+
+### Ambient RNA removal
+
+```{r}
+#Oxford
+Oxford.list.data = c()
+to.add.manually = c("HC0701","NaiveSA131","ResistantSA145","ActiveSA166","UPASA149","UPASA153")
+#There are 2xSA166
+#No UPA
+
+path.to.read = "/data/lucy/OXFORD-KENNEDY-ALLDATA/COMBINED-RUNS/COUNTS/"
+Oxf.run = list.dirs(path = path.to.read, full.names = FALSE, recursive = FALSE)
+for (name in Oxf.run) {
+  if (name %in% to.add.manually) {} 
+  else {
+    print(name)
+    paste(path.to.read,"/outs/",sep=name)
+    Oxford.list.data[[name]]=SoupX.clean.from.CellRanger(paste(path.to.read,"/outs/",sep=name))
+  }
+}
+
+#Oxford.list.data[["HC0701"]] = SoupX.clean.from.CellRanger("/data/lucy/OXFORD-KENNEDY-ALLDATA/COMBINED-RUNS/COUNTS/ActiveSA166/")
+Oxford.list.data[["HC0701"]] = Read10X("/data/lucy/OXFORD-KENNEDY-ALLDATA/COMBINED-RUNS/COUNTS/HC0701/outs/filtered_gene_bc_matrices/GRCh38/")
+Oxford.list.data[["NaiveSA131"]] = Read10X("/data/lucy/OXFORD-KENNEDY-ALLDATA/COMBINED-RUNS/COUNTS/NaiveSA131/outs/filtered_gene_bc_matrices/GRCh38/")
+Oxford.list.data[["ResistantSA145"]] = Read10X("/data/lucy/OXFORD-KENNEDY-ALLDATA/COMBINED-RUNS/COUNTS/ResistantSA145/outs/filtered_gene_bc_matrices/GRCh38/")
+names(Oxford.list.data)
+length(Oxford.list.data)
+```
+
+### Seurat Object creation
+
+```{r, fig.width=12}
+Oxford.list = c()
+
+for (i in 1:length(Oxford.list.data)) {
+  print(i)
+  name = names(Oxford.list.data[i])
+  print(name)
+  Seurat.object = CreateSeuratObject(counts = Oxford.list.data[[i]], project = name)
+  #info used for % doublet calculation:
+  Seurat.object@misc$cell.recovered = ncol(Seurat.object)
+  Seurat.object[["percent.mt"]] <- PercentageFeatureSet(Seurat.object, pattern = "^MT-")
+  Seurat.object[["percent.hb"]] <- PercentageFeatureSet(Seurat.object, pattern = "^HB[^(P)]")
+  Seurat.object[["percent.ribo"]] <- PercentageFeatureSet(Seurat.object, pattern = ("RPS|RPL"))
+  #VlnPlot(Seurat.object, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+  plot1 <- FeatureScatter(Seurat.object, feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(Seurat.object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot3 <- FeatureScatter(Seurat.object, feature1 = "percent.ribo", feature2 = "percent.hb")
+  plot4 <- VlnPlot(Seurat.object, features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+  plot <- ((plot1 + plot2) / (plot3 + plot4))
+  plot = plot + plot_annotation(title = name, theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+  
+  # print("New seurat object:")
+  # print(Seurat.object)
+  # print("Old list:")
+  # print(Oxford.list)
+  
+  Oxford.list[[name]] = Seurat.object
+  # print("New list:")
+  # print(Oxford.list)
+  rm(Seurat.object)
+}
+
+length(Oxford.list)==length(Oxford.list.data)
+```
+
+### QC
+
+Based on https://matthieuxmoreau.github.io/EarlyPallialNeurogenesis/html-Reports/Quality_Control.html code
+
+```{r, fig.width=6, fig.height=8}
+for (i in 1:length(Oxford.list)) {
+  #print(i)
+  Cell.QC.Stat <- Oxford.list[[i]]@meta.data
+  print(nrow(Cell.QC.Stat))
+  # high and low median absolute deviation (mad) thresholds to exclude outlier cells
+  max.mito.thr <- median(Cell.QC.Stat$percent.mt) + 3*mad(Cell.QC.Stat$percent.mt)
+  min.mito.thr <- median(Cell.QC.Stat$percent.mt) - 3*mad(Cell.QC.Stat$percent.mt)
+
+  #Plot
+  p1 <- ggplot(Cell.QC.Stat, aes(x=nFeature_RNA, y=percent.mt)) +
+      geom_point() +
+      geom_hline(aes(yintercept = max.mito.thr), colour = "red", linetype = 2) +
+      geom_hline(aes(yintercept = min.mito.thr), colour = "red", linetype = 2) +
+      annotate(geom = "text", label = paste0(as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[2])," cells removed\n", as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[1])," cells remain"), x = 6000, y = 0.1)
+  #print("OK")
+  Cell.QC.Stat <- Cell.QC.Stat %>% filter(percent.mt < max.mito.thr) %>% filter(percent.mt > min.mito.thr)
+  #print("OK2")
+  # Set low and hight thresholds on the number of detected genes
+  min.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) - 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+  max.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) + 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+  # Set hight threshold on the number of transcripts
+  max.nUMI.thr <- median(log10(Cell.QC.Stat$nCount_RNA)) + 3*mad(log10(Cell.QC.Stat$nCount_RNA))
+  
+  p2 <- ggplot(Cell.QC.Stat, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) +
+      geom_point() +
+      geom_smooth(method="lm") +
+      geom_hline(aes(yintercept = min.Genes.thr), colour = "green", linetype = 2) +
+      geom_hline(aes(yintercept = max.Genes.thr), colour = "green", linetype = 2) +
+      geom_vline(aes(xintercept = max.nUMI.thr), colour = "red", linetype = 2)
+  
+  p3 <- p1 / p2
+  #p1=ggExtra::ggMarginal(p1, type = "histogram", fill="lightgrey", bins=100)
+  #p2=ggExtra::ggMarginal(p2, type = "histogram", fill="lightgrey")
+  #print(typeof(p1))
+  #p3 <- p1 / p2
+  p3 <- p3 + plot_annotation(title = names(Oxford.list[[i]]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(p3)
+
+  # Filter cells based on these thresholds
+  
+  Cell.QC.Stat <- Cell.QC.Stat %>% filter(log10(nFeature_RNA) > min.Genes.thr) %>% filter(log10(nCount_RNA) < max.nUMI.thr)
+  print(nrow(Cell.QC.Stat))
+  print("########")
+  Oxford.list[[i]] <- subset(Oxford.list[[i]], cells = rownames(Cell.QC.Stat))
+  rm(Cell.QC.Stat)
+}
+
+print(length(Oxford.list))
+```
+
+```{r, fig.width=12}
+for (i in 1:length(Oxford.list)) {
+  plot1 <- FeatureScatter(Oxford.list[[i]], feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(Oxford.list[[i]], feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot3 <- FeatureScatter(Oxford.list[[i]], feature1 = "percent.ribo", feature2 = "percent.hb")
+  plot4 <- VlnPlot(Oxford.list[[i]], features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+  plot <- ((plot1 + plot2) / (plot3 + plot4))
+  plot = plot + plot_annotation(title = names(Oxford.list[[i]]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+}
+
+names(Oxford.list)
+length(Oxford.list)
+length(Oxford.list)==length(Oxford.list.data)
+```
+
+### Doublet Removal
+
+```{r}
+gc()
+
+for (i in 1:length(Oxford.list)) {
+  Oxford.list[[i]] <- NormalizeData(Oxford.list[[i]])
+  Oxford.list[[i]] <- FindVariableFeatures(Oxford.list[[i]], selection.method = "vst", nfeatures = 2000)
+  Oxford.list[[i]] <- ScaleData(Oxford.list[[i]])
+  
+  Oxford.list[[i]] <- RunPCA(object = Oxford.list[[i]], npcs = 20)
+  Oxford.list[[i]] <- RunUMAP(object = Oxford.list[[i]], dims = 1:20)
+  Oxford.list[[i]] <- FindNeighbors(Oxford.list[[i]], dims = 1:20) %>% FindClusters(resolution = 0.1)
+  
+  plot = DimPlot(Oxford.list[[i]])
+  plot = plot + plot_annotation(title = names(Oxford.list[i]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+  
+  Oxford.list[[i]] = DoubletMark(Oxford.list[[i]])
+  
+  print(DimPlot(Oxford.list[[i]], group.by = "Doublets Low Confidence"))
+  print(DimPlot(Oxford.list[[i]], group.by = "Doublets High Confidence"))
+}
+
+
+```
+
+## Glasgow1
+
+### Ambient RNA removal
+
+```{r}
+#Glasgow1
+Glasgow1.list.data = c()
+to.add.manually = c("SA149","SA154")
+#UPA
+
+#What to do with:
+#"/datastore/lucy/POLYOMICS/A-JUNE-SYNOVIUM/" #?
+#"/datastore/lucy/POLYOMICS/B-AUGUST-SYNOVIUM/" #?
+
+path.to.read = "/datastore/lucy/POLYOMICS/COMBINED-RUNS/"
+Glas1.run1 = list.dirs(path = path.to.read, full.names = FALSE, recursive = FALSE)
+for (name in Glas1.run1) {
+  if (name %in% to.add.manually) {} 
+  else {
+    print(name)
+    #run_name=paste("", name, sep = "_")
+    Glasgow1.list.data[[name]]=SoupX.clean.from.CellRanger(paste(path.to.read,"/outs/",sep=name))
+  }
+}
+
+names(Glasgow1.list.data)
+length(Glasgow1.list.data)
+```
+
+### Seurat Object creation
+
+```{r, fig.width=12}
+Glasgow1.list = c()
+
+for (i in 1:length(Glasgow1.list.data)) {
+  #print(i)
+  name = names(Glasgow1.list.data[i])
+  print(name)
+  Seurat.object = CreateSeuratObject(counts = Glasgow1.list.data[[i]], project = name)
+  #info used for % doublet calculation:
+  Seurat.object@misc$cell.recovered = ncol(Seurat.object)
+  Seurat.object[["percent.mt"]] <- PercentageFeatureSet(Seurat.object, pattern = "^MT-")
+  Seurat.object[["percent.hb"]] <- PercentageFeatureSet(Seurat.object, pattern = "^HB[^(P)]")
+  Seurat.object[["percent.ribo"]] <- PercentageFeatureSet(Seurat.object, pattern = ("RPS|RPL"))
+  #VlnPlot(Seurat.object, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+  plot1 <- FeatureScatter(Seurat.object, feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(Seurat.object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot3 <- FeatureScatter(Seurat.object, feature1 = "percent.ribo", feature2 = "percent.hb")
+  plot4 <- VlnPlot(Seurat.object, features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+  plot <- ((plot1 + plot2) / (plot3 + plot4))
+  plot = plot + plot_annotation(title = name, theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+  
+  # print("New seurat object:")
+  # print(Seurat.object)
+  # print("Old list:")
+  # print(Oxford.list)
+  
+  Glasgow1.list[[name]] = Seurat.object
+  # print("New list:")
+  # print(Oxford.list)
+  rm(Seurat.object)
+}
+
+Glasgow1.list
+```
+
+### QC
+
+Based on https://matthieuxmoreau.github.io/EarlyPallialNeurogenesis/html-Reports/Quality_Control.html code
+
+```{r, fig.width=6, fig.height=8}
+for (i in 1:length(Glasgow1.list)) {
+  #print(i)
+  Cell.QC.Stat <- Glasgow1.list[[i]]@meta.data
+  print(nrow(Cell.QC.Stat))
+  # high and low median absolute deviation (mad) thresholds to exclude outlier cells
+  max.mito.thr <- median(Cell.QC.Stat$percent.mt) + 3*mad(Cell.QC.Stat$percent.mt)
+  min.mito.thr <- median(Cell.QC.Stat$percent.mt) - 3*mad(Cell.QC.Stat$percent.mt)
+
+  #Plot
+  p1 <- ggplot(Cell.QC.Stat, aes(x=nFeature_RNA, y=percent.mt)) +
+      geom_point() +
+      geom_hline(aes(yintercept = max.mito.thr), colour = "red", linetype = 2) +
+      geom_hline(aes(yintercept = min.mito.thr), colour = "red", linetype = 2) +
+      annotate(geom = "text", label = paste0(as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[2])," cells removed\n", as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[1])," cells remain"), x = 6000, y = 0.1)
+  
+  Cell.QC.Stat <- Cell.QC.Stat %>% filter(percent.mt < max.mito.thr) %>% filter(percent.mt > min.mito.thr)
+  
+  # Set low and hight thresholds on the number of detected genes
+  min.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) - 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+  max.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) + 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+  # Set hight threshold on the number of transcripts
+  max.nUMI.thr <- median(log10(Cell.QC.Stat$nCount_RNA)) + 3*mad(log10(Cell.QC.Stat$nCount_RNA))
+  
+  p2 <- ggplot(Cell.QC.Stat, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) +
+      geom_point() +
+      geom_smooth(method="lm") +
+      geom_hline(aes(yintercept = min.Genes.thr), colour = "green", linetype = 2) +
+      geom_hline(aes(yintercept = max.Genes.thr), colour = "green", linetype = 2) +
+      geom_vline(aes(xintercept = max.nUMI.thr), colour = "red", linetype = 2)
+  
+  p3 <- p1 / p2
+  #p1=ggExtra::ggMarginal(p1, type = "histogram", fill="lightgrey", bins=100)
+  #p2=ggExtra::ggMarginal(p2, type = "histogram", fill="lightgrey")
+  #print(typeof(p1))
+  #p3 <- p1 / p2
+  p3 <- p3 + plot_annotation(title = names(Glasgow1.list[[i]]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(p3)
+
+  # Filter cells based on these thresholds
+  
+  Cell.QC.Stat <- Cell.QC.Stat %>% filter(log10(nFeature_RNA) > min.Genes.thr) %>% filter(log10(nCount_RNA) < max.nUMI.thr)
+  print(nrow(Cell.QC.Stat))
+  print("########")
+  Glasgow1.list[[i]] <- subset(Glasgow1.list[[i]], cells = rownames(Cell.QC.Stat))
+  rm(Cell.QC.Stat)
+}
+```
+
+```{r, fig.width=12}
+for (i in 1:length(Glasgow1.list)) {
+  plot1 <- FeatureScatter(Glasgow1.list[[i]], feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(Glasgow1.list[[i]], feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot3 <- FeatureScatter(Glasgow1.list[[i]], feature1 = "percent.ribo", feature2 = "percent.hb")
+  plot4 <- VlnPlot(Glasgow1.list[[i]], features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+  plot <- ((plot1 + plot2) / (plot3 + plot4))
+  plot = plot + plot_annotation(title = names(Glasgow1.list[[i]]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+}
+
+names(Glasgow1.list)
+length(Glasgow1.list)
+length(Glasgow1.list)==length(Glasgow1.list.data)
+```
+
+### Doublet Removal
+
+```{r}
+gc()
+
+for (i in 1:length(Glasgow1.list)) {
+  Glasgow1.list[[i]] <- NormalizeData(Glasgow1.list[[i]])
+  Glasgow1.list[[i]] <- FindVariableFeatures(Glasgow1.list[[i]], selection.method = "vst", nfeatures = 2000)
+  Glasgow1.list[[i]] <- ScaleData(Glasgow1.list[[i]])
+  
+  Glasgow1.list[[i]] <- RunPCA(object = Glasgow1.list[[i]], npcs = 20)
+  Glasgow1.list[[i]] <- RunUMAP(object = Glasgow1.list[[i]], dims = 1:20)
+  Glasgow1.list[[i]] <- FindNeighbors(Glasgow1.list[[i]], dims = 1:20) %>% FindClusters(resolution = 0.1)
+  
+  plot = DimPlot(Glasgow1.list[[i]])
+  plot = plot + plot_annotation(title = names(Glasgow1.list[i]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+  
+  Glasgow1.list[[i]] = DoubletMark(Glasgow1.list[[i]])
+  
+  print(DimPlot(Glasgow1.list[[i]], group.by = "Doublets Low Confidence"))
+  print(DimPlot(Glasgow1.list[[i]], group.by = "Doublets High Confidence"))
+}
+
+
+```
+
+## Glasgow2
+
+### Ambient RNA removal
+
+```{r}
+#glasgow2 (+10x healthy)
+#ST
+Glasgow2.ST.list.data = c()
+to.add.manually = c("DoubletFinder","SA271_SYN","SA276_SYN")
+
+path.to.read = "/data/lucy/trajectory/SynovialTissue/"
+Glas2.st = list.dirs(path = path.to.read, full.names = FALSE, recursive = FALSE)
+for (name in Glas2.st) {
+  if (name %in% to.add.manually) {} 
+  else {
+    print(name)
+    #run_name=paste("", name, sep = "_")
+    Glasgow2.ST.list.data[[name]]=SoupX.clean.from.CellRanger(paste(path.to.read,"/outs/",sep=name))
+  }
+}
+
+Glasgow2.ST.list.data[["SA271_SYN"]] = Read10X("/data/lucy/trajectory/SynovialTissue/SA271_SYN/outs/filtered_feature_bc_matrix/")
+Glasgow2.ST.list.data[["SA276_SYN"]] = Read10X("/data/lucy/trajectory/SynovialTissue/SA276_SYN/outs/filtered_feature_bc_matrix/")
+names(Glasgow2.ST.list.data)
+```
+
+```{r}
+#PB
+Glasgow2.PB.list.data = c()
+to.add.manually = c("DoubletFinder","PBMC10x10kV3","SA271_Blood")
+#SA271_Blood there are 2 folders
+
+path.to.read = "/data/lucy/trajectory/PeripheralBlood/"
+Glas2.pb = list.dirs(path = path.to.read, full.names = FALSE, recursive = FALSE)
+for (name in Glas2.pb) {
+  if (name %in% to.add.manually) {} 
+  else {
+    print(name)
+    #run_name=paste("", name, sep = "_")
+    Glasgow2.PB.list.data[[name]]=SoupX.clean.from.CellRanger(paste(path.to.read,"/outs/",sep=name))
+  }
+}
+
+names(Glasgow2.PB.list.data)
+```
+
+### Seurat Object creation
+
+```{r, fig.width=12}
+Glasgow2.ST.list = c()
+Glasgow2.PB.list = c()
+
+for (i in 1:length(Glasgow2.ST.list.data)) {
+  #print(i)
+  name = names(Glasgow2.ST.list.data[i])
+  print(name)
+  Seurat.object = CreateSeuratObject(counts = Glasgow2.ST.list.data[[i]], project = name)
+  #info used for % doublet calculation:
+  Seurat.object@misc$cell.recovered = ncol(Seurat.object)
+  Seurat.object[["percent.mt"]] <- PercentageFeatureSet(Seurat.object, pattern = "^MT-")
+  Seurat.object[["percent.hb"]] <- PercentageFeatureSet(Seurat.object, pattern = "^HB[^(P)]")
+  Seurat.object[["percent.ribo"]] <- PercentageFeatureSet(Seurat.object, pattern = ("RPS|RPL"))
+  #VlnPlot(Seurat.object, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+  plot1 <- FeatureScatter(Seurat.object, feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(Seurat.object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot3 <- FeatureScatter(Seurat.object, feature1 = "percent.ribo", feature2 = "percent.hb")
+  plot4 <- VlnPlot(Seurat.object, features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+  plot <- ((plot1 + plot2) / (plot3 + plot4))
+  plot = plot + plot_annotation(title = name, theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+  
+  # print("New seurat object:")
+  # print(Seurat.object)
+  # print("Old list:")
+  # print(Glasgow2.ST.list)
+  
+  Glasgow2.ST.list[[name]] = Seurat.object
+  # print("New list:")
+  # print(Glasgow2.ST.list)
+  rm(Seurat.object)
+}
+
+for (i in 1:length(Glasgow2.PB.list.data)) {
+  #print(i)
+  name = names(Glasgow2.PB.list.data[i])
+  print(name)
+  Seurat.object = CreateSeuratObject(counts = Glasgow2.PB.list.data[[i]], project = name)
+  #info used for % doublet calculation:
+  Seurat.object@misc$cell.recovered = ncol(Seurat.object)
+  Seurat.object[["percent.mt"]] <- PercentageFeatureSet(Seurat.object, pattern = "^MT-")
+  Seurat.object[["percent.hb"]] <- PercentageFeatureSet(Seurat.object, pattern = "^HB[^(P)]")
+  Seurat.object[["percent.ribo"]] <- PercentageFeatureSet(Seurat.object, pattern = ("RPS|RPL"))
+  #VlnPlot(Seurat.object, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+  plot1 <- FeatureScatter(Seurat.object, feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(Seurat.object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot3 <- FeatureScatter(Seurat.object, feature1 = "percent.ribo", feature2 = "percent.hb")
+  plot4 <- VlnPlot(Seurat.object, features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+  plot <- ((plot1 + plot2) / (plot3 + plot4))
+  plot = plot + plot_annotation(title = name, theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+  
+  # print("New seurat object:")
+  # print(Seurat.object)
+  # print("Old list:")
+  # print(Glasgow2.PB.list)
+  
+  Glasgow2.PB.list[[name]] = Seurat.object
+  # print("New list:")
+  # print(Glasgow2.PB.list)
+  rm(Seurat.object)
+}
+
+Glasgow2.ST.list
+Glasgow2.PB.list
+```
+
+### QC
+
+Based on https://matthieuxmoreau.github.io/EarlyPallialNeurogenesis/html-Reports/Quality_Control.html code
+
+```{r, fig.width=6, fig.height=8}
+for (i in 1:length(Glasgow2.ST.list)) {
+  #print(i)
+  Cell.QC.Stat <- Glasgow2.ST.list[[i]]@meta.data
+  print(nrow(Cell.QC.Stat))
+  # high and low median absolute deviation (mad) thresholds to exclude outlier cells
+  max.mito.thr <- median(Cell.QC.Stat$percent.mt) + 3*mad(Cell.QC.Stat$percent.mt)
+  min.mito.thr <- median(Cell.QC.Stat$percent.mt) - 3*mad(Cell.QC.Stat$percent.mt)
+
+  #Plot
+  p1 <- ggplot(Cell.QC.Stat, aes(x=nFeature_RNA, y=percent.mt)) +
+      geom_point() +
+      geom_hline(aes(yintercept = max.mito.thr), colour = "red", linetype = 2) +
+      geom_hline(aes(yintercept = min.mito.thr), colour = "red", linetype = 2) +
+      annotate(geom = "text", label = paste0(as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[2])," cells removed\n", as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[1])," cells remain"), x = 6000, y = 0.1)
+  
+  Cell.QC.Stat <- Cell.QC.Stat %>% filter(percent.mt < max.mito.thr) %>% filter(percent.mt > min.mito.thr)
+  
+  # Set low and hight thresholds on the number of detected genes
+  min.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) - 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+  max.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) + 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+  # Set hight threshold on the number of transcripts
+  max.nUMI.thr <- median(log10(Cell.QC.Stat$nCount_RNA)) + 3*mad(log10(Cell.QC.Stat$nCount_RNA))
+  
+  p2 <- ggplot(Cell.QC.Stat, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) +
+      geom_point() +
+      geom_smooth(method="lm") +
+      geom_hline(aes(yintercept = min.Genes.thr), colour = "green", linetype = 2) +
+      geom_hline(aes(yintercept = max.Genes.thr), colour = "green", linetype = 2) +
+      geom_vline(aes(xintercept = max.nUMI.thr), colour = "red", linetype = 2)
+  
+  p3 <- p1 / p2
+  #p1=ggExtra::ggMarginal(p1, type = "histogram", fill="lightgrey", bins=100)
+  #p2=ggExtra::ggMarginal(p2, type = "histogram", fill="lightgrey")
+  #print(typeof(p1))
+  #p3 <- p1 / p2
+  p3 <- p3 + plot_annotation(title = names(Glasgow2.ST.list[[i]]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(p3)
+
+  # Filter cells based on these thresholds
+  
+  Cell.QC.Stat <- Cell.QC.Stat %>% filter(log10(nFeature_RNA) > min.Genes.thr) %>% filter(log10(nCount_RNA) < max.nUMI.thr)
+  print(nrow(Cell.QC.Stat))
+  print("########")
+  Glasgow2.ST.list[[i]] <- subset(Glasgow2.ST.list[[i]], cells = rownames(Cell.QC.Stat))
+  rm(Cell.QC.Stat)
+}
+
+for (i in 1:length(Glasgow2.PB.list)) {
+  #print(i)
+  Cell.QC.Stat <- Glasgow2.PB.list[[i]]@meta.data
+  print(nrow(Cell.QC.Stat))
+  # high and low median absolute deviation (mad) thresholds to exclude outlier cells
+  max.mito.thr <- median(Cell.QC.Stat$percent.mt) + 3*mad(Cell.QC.Stat$percent.mt)
+  min.mito.thr <- median(Cell.QC.Stat$percent.mt) - 3*mad(Cell.QC.Stat$percent.mt)
+
+  #Plot
+  p1 <- ggplot(Cell.QC.Stat, aes(x=nFeature_RNA, y=percent.mt)) +
+      geom_point() +
+      geom_hline(aes(yintercept = max.mito.thr), colour = "red", linetype = 2) +
+      geom_hline(aes(yintercept = min.mito.thr), colour = "red", linetype = 2) +
+      annotate(geom = "text", label = paste0(as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[2])," cells removed\n", as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[1])," cells remain"), x = 6000, y = 0.1)
+  
+  Cell.QC.Stat <- Cell.QC.Stat %>% filter(percent.mt < max.mito.thr) %>% filter(percent.mt > min.mito.thr)
+  
+  # Set low and hight thresholds on the number of detected genes
+  min.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) - 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+  max.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) + 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+  # Set hight threshold on the number of transcripts
+  max.nUMI.thr <- median(log10(Cell.QC.Stat$nCount_RNA)) + 3*mad(log10(Cell.QC.Stat$nCount_RNA))
+  
+  p2 <- ggplot(Cell.QC.Stat, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) +
+      geom_point() +
+      geom_smooth(method="lm") +
+      geom_hline(aes(yintercept = min.Genes.thr), colour = "green", linetype = 2) +
+      geom_hline(aes(yintercept = max.Genes.thr), colour = "green", linetype = 2) +
+      geom_vline(aes(xintercept = max.nUMI.thr), colour = "red", linetype = 2)
+  
+  p3 <- p1 / p2
+  #p1=ggExtra::ggMarginal(p1, type = "histogram", fill="lightgrey", bins=100)
+  #p2=ggExtra::ggMarginal(p2, type = "histogram", fill="lightgrey")
+  #print(typeof(p1))
+  #p3 <- p1 / p2
+  p3 <- p3 + plot_annotation(title = names(Glasgow2.PB.list[[i]]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(p3)
+
+  # Filter cells based on these thresholds
+  
+  Cell.QC.Stat <- Cell.QC.Stat %>% filter(log10(nFeature_RNA) > min.Genes.thr) %>% filter(log10(nCount_RNA) < max.nUMI.thr)
+  print(nrow(Cell.QC.Stat))
+  print("########")
+  Glasgow2.PB.list[[i]] <- subset(Glasgow2.PB.list[[i]], cells = rownames(Cell.QC.Stat))
+  rm(Cell.QC.Stat)
+}
+```
+
+```{r, fig.width=12}
+for (i in 1:length(Glasgow2.ST.list)) {
+  plot1 <- FeatureScatter(Glasgow2.ST.list[[i]], feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(Glasgow2.ST.list[[i]], feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot3 <- FeatureScatter(Glasgow2.ST.list[[i]], feature1 = "percent.ribo", feature2 = "percent.hb")
+  plot4 <- VlnPlot(Glasgow2.ST.list[[i]], features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+  plot <- ((plot1 + plot2) / (plot3 + plot4))
+  plot = plot + plot_annotation(title = names(Glasgow2.ST.list[[i]]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+}
+
+for (i in 1:length(Glasgow2.PB.list)) {
+  plot1 <- FeatureScatter(Glasgow2.PB.list[[i]], feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(Glasgow2.PB.list[[i]], feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot3 <- FeatureScatter(Glasgow2.PB.list[[i]], feature1 = "percent.ribo", feature2 = "percent.hb")
+  plot4 <- VlnPlot(Glasgow2.PB.list[[i]], features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+  plot <- ((plot1 + plot2) / (plot3 + plot4))
+  plot = plot + plot_annotation(title = names(Glasgow2.PB.list[[i]]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+}
+
+length(Glasgow2.ST.list)==length(Glasgow2.ST.list.data)
+length(Glasgow2.PB.list)==length(Glasgow2.PB.list.data)
+```
+
+### Doublet Removal
+
+```{r}
+gc()
+
+for (i in 1:length(Glasgow2.ST.list)) {
+  Glasgow2.ST.list[[i]] <- NormalizeData(Glasgow2.ST.list[[i]])
+  Glasgow2.ST.list[[i]] <- FindVariableFeatures(Glasgow2.ST.list[[i]], selection.method = "vst", nfeatures = 2000)
+  Glasgow2.ST.list[[i]] <- ScaleData(Glasgow2.ST.list[[i]])
+  
+  Glasgow2.ST.list[[i]] <- RunPCA(object = Glasgow2.ST.list[[i]], npcs = 20)
+  Glasgow2.ST.list[[i]] <- RunUMAP(object = Glasgow2.ST.list[[i]], dims = 1:20)
+  Glasgow2.ST.list[[i]] <- FindNeighbors(Glasgow2.ST.list[[i]], dims = 1:20) %>% FindClusters(resolution = 0.1)
+  
+  plot = DimPlot(Glasgow2.ST.list[[i]])
+  plot = plot + plot_annotation(title = names(Glasgow2.ST.list[i]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+  
+  Glasgow2.ST.list[[i]] = DoubletMark(Glasgow2.ST.list[[i]], n.cell.recovered=Glasgow2.ST.list[[i]]@misc$cell.recovered)
+  
+  print(DimPlot(Glasgow2.ST.list[[i]], group.by = "Doublets Low Confidence"))
+  print(DimPlot(Glasgow2.ST.list[[i]], group.by = "Doublets High Confidence"))
+}
+
+for (i in 1:length(Glasgow2.PB.list)) {
+  Glasgow2.PB.list[[i]] <- NormalizeData(Glasgow2.PB.list[[i]])
+  Glasgow2.PB.list[[i]] <- FindVariableFeatures(Glasgow2.PB.list[[i]], selection.method = "vst", nfeatures = 2000)
+  Glasgow2.PB.list[[i]] <- ScaleData(Glasgow2.PB.list[[i]])
+  
+  Glasgow2.PB.list[[i]] <- RunPCA(object = Glasgow2.PB.list[[i]], npcs = 20)
+  Glasgow2.PB.list[[i]] <- RunUMAP(object = Glasgow2.PB.list[[i]], dims = 1:20)
+  Glasgow2.PB.list[[i]] <- FindNeighbors(Glasgow2.PB.list[[i]], dims = 1:20) %>% FindClusters(resolution = 0.1)
+  
+  plot = DimPlot(Glasgow2.PB.list[[i]])
+  plot = plot + plot_annotation(title = names(Glasgow2.PB.list[i]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+  
+  Glasgow2.PB.list[[i]] = DoubletMark(Glasgow2.PB.list[[i]], n.cell.recovered=Glasgow2.PB.list[[i]]@misc$cell.recovered)
+  
+  print(DimPlot(Glasgow2.PB.list[[i]], group.by = "Doublets Low Confidence"))
+  print(DimPlot(Glasgow2.PB.list[[i]], group.by = "Doublets High Confidence"))
+}
+```
+
+##10X
+
+### Ambient RNA removal
+
+```{r}
+PBMC10x10kV3.data = Read10X("/data/lucy/trajectory/PeripheralBlood/PBMC10x10kV3/filtered_feature_bc_matrix/")
+```
+
+### Seurat Object creation
+
+```{r, fig.width=12}
+PBMC10x10kV3 = CreateSeuratObject(counts = PBMC10x10kV3.data, project = "PBMC_10X")
+#info used for % doublet calculation:
+PBMC10x10kV3@misc$cell.recovered = ncol(PBMC10x10kV3)
+PBMC10x10kV3[["percent.mt"]] <- PercentageFeatureSet(PBMC10x10kV3, pattern = "^MT-")
+PBMC10x10kV3[["percent.hb"]] <- PercentageFeatureSet(PBMC10x10kV3, pattern = "^HB[^(P)]")
+PBMC10x10kV3[["percent.ribo"]] <- PercentageFeatureSet(PBMC10x10kV3, pattern = ("RPS|RPL"))
+#VlnPlot(PBMC10x10kV3, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+plot1 <- FeatureScatter(PBMC10x10kV3, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(PBMC10x10kV3, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot3 <- FeatureScatter(PBMC10x10kV3, feature1 = "percent.ribo", feature2 = "percent.hb")
+plot4 <- VlnPlot(PBMC10x10kV3, features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+plot <- ((plot1 + plot2) / (plot3 + plot4))
+plot = plot + plot_annotation(title = "PBMC 10X", theme = theme(plot.title = element_text(hjust = 0.5)))
+print(plot)
+```
+
+### QC
+
+Based on https://matthieuxmoreau.github.io/EarlyPallialNeurogenesis/html-Reports/Quality_Control.html code
+
+```{r, fig.width=6, fig.height=8}
+
+Cell.QC.Stat <- PBMC10x10kV3@meta.data
+print(nrow(Cell.QC.Stat))
+# high and low median absolute deviation (mad) thresholds to exclude outlier cells
+max.mito.thr <- median(Cell.QC.Stat$percent.mt) + 3*mad(Cell.QC.Stat$percent.mt)
+min.mito.thr <- median(Cell.QC.Stat$percent.mt) - 3*mad(Cell.QC.Stat$percent.mt)
+
+#Plot
+p1 <- ggplot(Cell.QC.Stat, aes(x=nFeature_RNA, y=percent.mt)) +
+    geom_point() +
+    geom_hline(aes(yintercept = max.mito.thr), colour = "red", linetype = 2) +
+    geom_hline(aes(yintercept = min.mito.thr), colour = "red", linetype = 2) +
+    annotate(geom = "text", label = paste0(as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[2])," cells removed\n", as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[1])," cells remain"), x = 6000, y = 0.1)
+
+Cell.QC.Stat <- Cell.QC.Stat %>% filter(percent.mt < max.mito.thr) %>% filter(percent.mt > min.mito.thr)
+
+# Set low and hight thresholds on the number of detected genes
+min.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) - 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+max.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) + 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+# Set hight threshold on the number of transcripts
+max.nUMI.thr <- median(log10(Cell.QC.Stat$nCount_RNA)) + 3*mad(log10(Cell.QC.Stat$nCount_RNA))
+
+p2 <- ggplot(Cell.QC.Stat, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) +
+    geom_point() +
+    geom_smooth(method="lm") +
+    geom_hline(aes(yintercept = min.Genes.thr), colour = "green", linetype = 2) +
+    geom_hline(aes(yintercept = max.Genes.thr), colour = "green", linetype = 2) +
+    geom_vline(aes(xintercept = max.nUMI.thr), colour = "red", linetype = 2)
+
+p3 <- p1 / p2
+#p1=ggExtra::ggMarginal(p1, type = "histogram", fill="lightgrey", bins=100)
+#p2=ggExtra::ggMarginal(p2, type = "histogram", fill="lightgrey")
+#print(typeof(p1))
+#p3 <- p1 / p2
+p3 <- p3 + plot_annotation(title = names(PBMC10x10kV3), theme = theme(plot.title = element_text(hjust = 0.5)))
+print(p3)
+
+# Filter cells based on these thresholds
+
+Cell.QC.Stat <- Cell.QC.Stat %>% filter(log10(nFeature_RNA) > min.Genes.thr) %>% filter(log10(nCount_RNA) < max.nUMI.thr)
+print(nrow(Cell.QC.Stat))
+print("########")
+PBMC10x10kV3 <- subset(PBMC10x10kV3, cells = rownames(Cell.QC.Stat))
+rm(Cell.QC.Stat)
+```
+
+```{r, fig.width=12}
+plot1 <- FeatureScatter(PBMC10x10kV3, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(PBMC10x10kV3, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot3 <- FeatureScatter(PBMC10x10kV3, feature1 = "percent.ribo", feature2 = "percent.hb")
+plot4 <- VlnPlot(PBMC10x10kV3, features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+plot <- ((plot1 + plot2) / (plot3 + plot4))
+plot = plot + plot_annotation(title = names("PBMC 10x"), theme = theme(plot.title = element_text(hjust = 0.5)))
+print(plot)
+```
+
+### Doublet Removal
+
+```{r}
+gc()
+
+PBMC10x10kV3 <- NormalizeData(PBMC10x10kV3)
+PBMC10x10kV3 <- FindVariableFeatures(PBMC10x10kV3, selection.method = "vst", nfeatures = 2000)
+PBMC10x10kV3 <- ScaleData(PBMC10x10kV3)
+
+PBMC10x10kV3 <- RunPCA(object = PBMC10x10kV3, npcs = 20)
+PBMC10x10kV3 <- RunUMAP(object = PBMC10x10kV3, dims = 1:20)
+PBMC10x10kV3 <- FindNeighbors(PBMC10x10kV3, dims = 1:20) %>% FindClusters(resolution = 0.1)
+
+plot = DimPlot(PBMC10x10kV3)
+plot = plot + plot_annotation(title = names(Oxford.list[i]), theme = theme(plot.title = element_text(hjust = 0.5)))
+print(plot)
+
+PBMC10x10kV3 = DoubletMark(PBMC10x10kV3, n.cell.recovered=PBMC10x10kV3@misc$cell.recovered)
+
+print(DimPlot(PBMC10x10kV3, group.by = "Doublets Low Confidence"))
+print(DimPlot(PBMC10x10kV3, group.by = "Doublets High Confidence"))
+```
+
+#Glasgow 3
+
+It has been processed like the others, in another Script.
+
+```{r}
+Glasgow3 <- readRDS("/datastore/Dom/Saved/WholeST/Jun23_A1-A10+Nointron.rds")
+Glasgow3.list = SplitObject(Glasgow3, split.by = "Unique_ID")
+```
+
+# Splitting datasets and uniform metadata
+
+```{r}
+gc()
+rm(Oxford.list.data)
+Oxford <- merge(Oxford.list[[1]], y = Oxford.list[2:length(Oxford.list)], project = "Oxford")
+Oxford$Experiment <- "Oxford"
+Oxford$Tissue <- "ST"
+Oxford$Unique_ID <- Oxford$orig.ident
+Oxford$Cont <- "No"
+Oxford.list.plus.meta = SplitObject(Oxford, split.by = "Unique_ID")
+table(Oxford$Experiment)
+table(Oxford$Tissue)
+table(Oxford$Unique_ID)
+length(Oxford.list.plus.meta)
+rm(Oxford)
+```
+
+```{r}
+rm(Glasgow1.list.data)
+Glasgow1 <- merge(Glasgow1.list[[1]], y = Glasgow1.list[2:length(Glasgow1.list)], project = "Glasgow1")
+Glasgow1$Experiment <- "Glasgow1"
+Glasgow1$Tissue <- "ST"
+Glasgow1$Unique_ID <- Glasgow1$orig.ident
+Glasgow1$Cont <- "No"
+Glasgow1.list.plus.meta = SplitObject(Glasgow1, split.by = "Unique_ID")
+table(Glasgow1$Experiment)
+table(Glasgow1$Tissue)
+table(Glasgow1$Unique_ID)
+length(Glasgow1.list.plus.meta)
+rm(Glasgow1)
+```
+
+```{r}
+rm(Glasgow2.ST.list.data)
+Glasgow2.ST <- merge(Glasgow2.ST.list[[1]], y = Glasgow2.ST.list[2:length(Glasgow2.ST.list)], project = "Glasgow2_ST")
+Glasgow2.ST$Experiment <- "Glasgow2_ST"
+Glasgow2.ST$Tissue <- "ST"
+Glasgow2.ST$Unique_ID <- Glasgow2.ST$orig.ident
+Glasgow2.ST$Cont = "No"
+Glasgow2.ST.list.plus.meta = SplitObject(Glasgow2.ST, split.by = "Unique_ID")
+table(Glasgow2.ST$Experiment)
+table(Glasgow2.ST$Tissue)
+table(Glasgow2.ST$Unique_ID)
+length(Glasgow2.ST.list.plus.meta)
+rm(Glasgow2.ST)
+```
+
+```{r}
+rm(Glasgow2.PB.list.data)
+Glasgow2.PB <- merge(Glasgow2.PB.list[[1]], y = Glasgow2.PB.list[2:length(Glasgow2.PB.list)], project = "Glasgow2_PB")
+Glasgow2.PB$Experiment <- "Glasgow2_PB"
+Glasgow2.PB$Tissue <- "PB"
+Glasgow2.PB$Cont = "No"
+Glasgow2.PB$Unique_ID <- Glasgow2.PB$orig.ident
+Glasgow2.PB.list.plus.meta = SplitObject(Glasgow2.PB, split.by = "Unique_ID")
+table(Glasgow2.PB$Experiment)
+table(Glasgow2.PB$Tissue)
+table(Glasgow2.PB$Unique_ID)
+length(Glasgow2.PB.list.plus.meta)
+rm(Glasgow2.PB)
+```
+
+```{r}
+PBMC10x10kV3$Experiment <- "10X"
+PBMC10x10kV3$Tissue <- "PB"
+PBMC10x10kV3$Unique_ID <- "PBMC_10X"
+PBMC10x10kV3$Cont = "No"
+```
+
+```{r}
+Glasgow3 <- merge(Glasgow3.list[[1]], y = Glasgow3.list[2:length(Glasgow3.list)], project = "Glasgow3")
+Glasgow3$Experiment <- "Glasgow3"
+Glasgow3$Tissue <- "ST"
+Glasgow3.list.plus.meta = SplitObject(Glasgow3, split.by = "Unique_ID")
+table(Glasgow3$Experiment)
+table(Glasgow3$Tissue)
+table(Glasgow3$Unique_ID)
+length(Glasgow3.list.plus.meta)
+rm(Glasgow3)
+```
+
+#Harmony integration
+
+```{r}
+Immunity.list = c(Oxford.list.plus.meta,Glasgow1.list.plus.meta,Glasgow2.ST.list.plus.meta,Glasgow2.PB.list.plus.meta,PBMC10x10kV3,Glasgow3.list.plus.meta)
+length(Immunity.list)
+Immunity.list
+```
+
+```{r}
+length(Immunity.list)
+Immunity <- merge(Immunity.list[[1]], y=Immunity.list[2:length(Immunity.list)], project = "ST.Immunity")
+rm(Immunity.list)
+gc()
+Immunity
+```
+
+```{r}
+gc()
+Immunity <- NormalizeData(Immunity)
+Immunity <- FindVariableFeatures(Immunity, selection.method = "vst", nfeatures = 2000)
+
+all.genes <- rownames(Immunity)
+Immunity <- ScaleData(Immunity)
+
+Immunity <- RunPCA(object = Immunity, npcs = 40)
+ElbowPlot(object = Immunity, ndims  = 40)
+DimPlot(Immunity, reduction = "pca")
+```
+
+```{r}
+gc()
+saveRDS(Immunity, "/datastore/Dom/Saved/Immunity_integration/Jun23_Immunity_merged.rds")
+Immunity <- RunHarmony(Immunity, group.by.vars = c("Unique_ID","Experiment","Tissue"), theta = c(2,2,0))
+ElbowPlot(object = Immunity, reduction = "harmony", ndims = 40)
+DimPlot(Immunity, reduction = "harmony")
+```
+
+```{r}
+Immunity <- RunUMAP(Immunity, reduction = "harmony", dims = 1:30)
+Immunity <- FindNeighbors(Immunity, reduction = "harmony", dims = 1:30) %>% FindClusters(resolution = 0.1)
+```
+
+```{r, fig.width=10}
+DimPlot(Immunity, label = TRUE, raster=FALSE)
+DimPlot(Immunity, group.by = "Tissue")
+DimPlot(Immunity, split.by = "Experiment", ncol = 3)
+```
+
+```{r, fig.width=12}
+FeaturePlot(Immunity, c("CD3E","IGKC","S100A12","CD1C","CLEC10A","CD14","TNF","SPP1"), ncol = 3, order=TRUE)
+```
+
+```{r}
+gc()
+saveRDS(Immunity, "/datastore/Dom/Saved/Immunity_integration/23_ImmunityIntegration_tetha_220_nointron.rds")
+```
+
+```{r}
+FeaturePlot(Immunity, c("CD1C","CLEC10A"))
+```
+

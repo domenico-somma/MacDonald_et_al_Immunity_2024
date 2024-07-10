@@ -1,0 +1,234 @@
+---
+title: "QC Organoids"
+output: html_notebook
+---
+
+# Load
+
+```{r}
+library(unixtools)
+set.tempdir("/datastore/Dom/temporary/")
+ulimit::memory_limit(75000)
+
+library(ggplot2)
+library(harmony)
+library(Seurat)
+library(patchwork)
+library(clustree)
+library(SeuratWrappers)
+library(Nebulosa)
+library(dsb)
+library(dplyr)
+library(DoubletFinder)
+
+source("/datastore/Dom/commonFunctions.R")
+```
+
+```{r}
+O1 = readRDS("/datastore/Dom/Organoids/Organoids Day1 Exp10 - CD45+ - No introns.rds")
+O2 = readRDS("/datastore/Dom/Organoids/Organoids Day2 Exp10 - CD45+_No introns.rds")
+O3 = readRDS("/datastore/Dom/Organoids/Organoids Day3 Exp10b - CD45+_No introns.rds")
+
+O1$orig.ident = "O1"
+O1$Condition = "Healthy"
+O2$orig.ident = "O2"
+O2$Condition = "Active"
+O3$orig.ident = "O3"
+O3$Condition = "Remission"
+```
+
+# QC
+
+```{r}
+plot.depth.seq(O1)
+plot.depth.seq(O2)
+plot.depth.seq(O3)
+```
+
+```{r, fig.width=8}
+O1 = Calc.Perc.Feature(O1, name = "Organoid Day1 - Healthy")
+O2 = Calc.Perc.Feature(O2, name = "Organoid Day2 - Active")
+O3 = Calc.Perc.Feature(O3, name = "Organoid Day3 - Remission")
+```
+
+```{r, fig.height=8}
+O1 = QC(O1)
+O2 = QC(O2)
+O3 = QC(O3)
+```
+
+```{r}
+plot.depth.seq(O1)
+plot.depth.seq(O2)
+plot.depth.seq(O3)
+```
+
+# Find doublets
+
+```{r}
+gc()
+
+O1 <- NormalizeData(O1)
+O1 <- FindVariableFeatures(O1, selection.method = "vst", nfeatures = 2000)
+O1 <- ScaleData(O1)
+
+O1 <- RunPCA(object = O1, npcs = 20)
+O1 <- RunUMAP(object = O1, dims = 1:20)
+O1 <- FindNeighbors(O1, dims = 1:20) %>% FindClusters(resolution = 0.1)
+
+plot = DimPlot(O1)
+#plot = plot + plot_annotation(title = names("O1", theme = theme(plot.title = element_text(hjust = 0.5)))
+print(plot)
+
+O1 = DoubletMark(O1, n.cell.recovered=O1@misc$cell.recovered)
+
+print(DimPlot(O1, group.by = "Doublets Low Confidence"))
+print(DimPlot(O1, group.by = "Doublets High Confidence"))
+
+gc()
+
+O2 <- NormalizeData(O2)
+O2 <- FindVariableFeatures(O2, selection.method = "vst", nfeatures = 2000)
+O2 <- ScaleData(O2)
+
+O2 <- RunPCA(object = O2, npcs = 20)
+O2 <- RunUMAP(object = O2, dims = 1:20)
+O2 <- FindNeighbors(O2, dims = 1:20) %>% FindClusters(resolution = 0.1)
+
+plot = DimPlot(O2)
+#plot = plot + plot_annotation(title = names("O2", theme = theme(plot.title = element_text(hjust = 0.5)))
+print(plot)
+
+O2 = DoubletMark(O2, n.cell.recovered=O2@misc$cell.recovered)
+
+print(DimPlot(O2, group.by = "Doublets Low Confidence"))
+print(DimPlot(O2, group.by = "Doublets High Confidence"))
+
+gc()
+
+O3 <- NormalizeData(O3)
+O3 <- FindVariableFeatures(O3, selection.method = "vst", nfeatures = 2000)
+O3 <- ScaleData(O3)
+
+O3 <- RunPCA(object = O3, npcs = 20)
+O3 <- RunUMAP(object = O3, dims = 1:20)
+O3 <- FindNeighbors(O3, dims = 1:20) %>% FindClusters(resolution = 0.1)
+
+plot = DimPlot(O3)
+#plot = plot + plot_annotation(title = names("O3", theme = theme(plot.title = element_text(hjust = 0.5)))
+print(plot)
+
+O3 = DoubletMark(O3, n.cell.recovered=O3@misc$cell.recovered)
+
+print(DimPlot(O3, group.by = "Doublets Low Confidence"))
+print(DimPlot(O3, group.by = "Doublets High Confidence"))
+```
+
+# Organoids integrations
+
+```{r}
+Organoids <- merge(O1, y = list(O2,O3), project = "Organoids")
+table(Organoids$orig.ident)
+```
+
+```{r}
+Organoids <- NormalizeData(Organoids)
+Organoids <- FindVariableFeatures(Organoids, selection.method = "vst", nfeatures = 2000)
+
+Organoids <- ScaleData(Organoids)
+
+Organoids <- RunPCA(object = Organoids, npcs = 40)
+ElbowPlot(object = Organoids, ndims  = 40)
+
+DimPlot(Organoids, reduction = "pca", group.by = "orig.ident")
+```
+
+```{r}
+Organoids <- RunHarmony(Organoids, group.by.vars = "orig.ident")
+Organoids <- RunUMAP(Organoids, reduction = "harmony", dims = 1:30)
+Organoids <- FindNeighbors(Organoids, reduction = "harmony", dims = 1:30) %>% FindClusters(resolution = 0.1)
+```
+
+# Annotation
+
+```{r, fig.width=10}
+DimPlot(Organoids, label = TRUE)
+DimPlot(Organoids, group.by = "Doublets Low Confidence")
+DimPlot(Organoids, group.by = "Doublets High Confidence")
+DimPlot(Organoids, split.by = "orig.ident")
+DimPlot(Organoids, split.by = "Condition")
+DimPlot(Organoids, split.by = "Sample_Name", ncol = 4)
+```
+
+```{r, fig.width=14}
+FeaturePlot(Organoids, c("CD14","CD1C", "FCGR3A", "BIRC5","CD3E","VWF","MS4A1","FCER1A","TPSB2"), ncol = 3)
+```
+
+```{r,fig.width=6, fig.height=10}
+Organoids@misc$markers <- FindAllMarkers(Organoids, logfc.threshold = 0.5, min.pct = 0.4, only.pos = TRUE)
+topgenes <- Organoids@misc$markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+Organoids.heatmap = subset(Organoids, downsample=300)
+```
+
+```{r,fig.width=6, fig.height=15}
+DoHeatmap(Organoids.heatmap, features = topgenes$gene) + NoLegend()
+```
+
+```{r}
+Organoids_meta <- read.csv("~/Organoids/Organoids_meta.csv", row.names=1)
+```
+
+```{r}
+Idents(Organoids) <- "Sample_Name"
+unique(Idents(Organoids))
+
+Organoids = make.add.meta(Organoids, Organoids_meta, verbose = TRUE)
+```
+
+```{r}
+table(Organoids$orig.ident, Organoids$Origin)
+```
+
+```{r}
+Organoids$celltype <- plyr::revalue(as.character(Organoids$seurat_clusters),
+                                        c("12"='B cells',
+                                          "13"='FLs',
+                                          "0"= "Classic Mo",
+                                          "1"= "Macrophage",
+                                          "5"= "Dcs",
+                                          "2"="CD16+",
+                                          "4"= "NKT",
+                                          "8"="HUVEC",
+                                          "7"="Cycling",
+                                          "6"="FCER1A+ CD1cNeg",
+                                          "15"="LAMP3+ CCR7+",
+                                          "3"="Inflammatory",
+                                          "11"="Mo IFN",
+                                          "10"="Mo IFN",
+                                          "14"="Macrophage",
+                                          "9"="pDC"))
+Idents(Organoids) <- "celltype"
+DimPlot(Organoids, label = TRUE, repel = TRUE)
+```
+
+```{r, fig.width=12}
+DimPlot(Organoids, split.by = "Origin", group.by = "celltype", label = TRUE)
+ProportionPlot(Organoids, "celltype" ,"Origin")
+```
+
+Organoids 4 looks good, and has same QC of other datasets
+
+# Singlets
+
+```{r}
+Idents(Organoids) <- "Origin"
+Organoids.singlets = subset(Organoids, idents = "-", invert = TRUE)
+table(Organoids.singlets$`Doublets Low Confidence`)
+Idents(Organoids.singlets) <- "Doublets Low Confidence"
+Organoids.singlets = subset(Organoids.singlets, idents = "Singlet")
+table(Organoids.singlets$`Doublets Low Confidence`)
+```
+
+```{r}
+saveRDS(Organoids.singlets, "/datastore/Dom/Organoids/Organoids_integrated.rds")
+```

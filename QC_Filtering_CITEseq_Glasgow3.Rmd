@@ -1,0 +1,2155 @@
+---
+title: "Glasgow3 + CITEseq"
+---
+
+So, apparently introns might affect a lot what's happening.
+
+```{r}
+library(unixtools)
+set.tempdir("/datastore3/Dom/temporary/")
+#ulimit::memory_limit(50000)
+
+library(ggplot2)
+library(harmony)
+library(Seurat)
+library(patchwork)
+library(clustree)
+library(SeuratWrappers)
+library(Nebulosa)
+library(cellhashR)
+library(dsb)
+library(dplyr)
+library(DoubletFinder)
+
+source("/datastore/Dom/commonFunctions.R")
+```
+
+# Introns
+
+## Read data and Ambient RNA removal
+
+```{r}
+Glasgow3.list.data = c()
+to.add.manually = c("oldMapping","nointron")
+
+path.to.read = "/datastore/Dom/Saved/WholeST/"
+Glas3.run = list.dirs(path = path.to.read, full.names = FALSE, recursive = FALSE)
+for (name in Glas3.run) {
+  if (name %in% to.add.manually) {} 
+  else {
+    print(name)
+#    run_name=paste("RUN1", name, sep = "_")
+    Glasgow3.list.data[[name]]=SoupX.clean.from.CellRanger(paste(path.to.read,"/",sep=name))
+  }
+}
+
+names(Glasgow3.list.data)
+```
+
+## Seurat Object creation
+
+```{r, fig.width=12}
+Glasgow3.list = c()
+
+for (i in 1:length(Glasgow3.list.data)) {
+  print(i)
+  name = names(Glasgow3.list.data[i])
+  print(name)
+  Seurat.object = CreateSeuratObject(counts = Glasgow3.list.data[[i]], project = name)
+  Seurat.object@misc$cell.recovered = ncol(Seurat.object)
+  Seurat.object[["percent.mt"]] <- PercentageFeatureSet(Seurat.object, pattern = "^MT-")
+  Seurat.object[["percent.hb"]] <- PercentageFeatureSet(Seurat.object, pattern = "^HB[^(P)]")
+  Seurat.object[["percent.ribo"]] <- PercentageFeatureSet(Seurat.object, pattern = ("RPS|RPL"))
+  #VlnPlot(Seurat.object, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+  plot1 <- FeatureScatter(Seurat.object, feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(Seurat.object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot3 <- FeatureScatter(Seurat.object, feature1 = "percent.ribo", feature2 = "percent.hb")
+  plot4 <- VlnPlot(Seurat.object, features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+  plot <- ((plot1 + plot2) / (plot3 + plot4))
+  plot = plot + plot_annotation(title = name, theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+  
+  # print("New seurat object:")
+  # print(Seurat.object)
+  # print("Old list:")
+  # print(Oxford.list)
+  
+  Glasgow3.list[[name]] = Seurat.object
+  # print("New list:")
+  # print(Oxford.list)
+  rm(Seurat.object)
+}
+
+Glasgow3.list
+```
+
+### QC
+
+Based on https://matthieuxmoreau.github.io/EarlyPallialNeurogenesis/html-Reports/Quality_Control.html code
+
+```{r, fig.width=6, fig.height=8}
+for (i in 1:length(Glasgow3.list)) {
+  #print(i)
+  Cell.QC.Stat <- Glasgow3.list[[i]]@meta.data
+  print(nrow(Cell.QC.Stat))
+  # high and low median absolute deviation (mad) thresholds to exclude outlier cells
+  max.mito.thr <- median(Cell.QC.Stat$percent.mt) + 3*mad(Cell.QC.Stat$percent.mt)
+  min.mito.thr <- median(Cell.QC.Stat$percent.mt) - 3*mad(Cell.QC.Stat$percent.mt)
+  #print("OK")
+  #Plot
+  p1 <- ggplot(Cell.QC.Stat, aes(x=nFeature_RNA, y=percent.mt)) +
+      geom_point() +
+      geom_hline(aes(yintercept = max.mito.thr), colour = "red", linetype = 2) +
+      geom_hline(aes(yintercept = min.mito.thr), colour = "red", linetype = 2) +
+      annotate(geom = "text", label = paste0(as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[2])," cells removed\n", as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[1])," cells remain"), x = 6000, y = 0.1)
+  #print("OK2")
+  Cell.QC.Stat <- Cell.QC.Stat %>% filter(percent.mt < max.mito.thr) %>% filter(percent.mt > min.mito.thr)
+  #print("OK3")
+  # Set low and hight thresholds on the number of detected genes
+  min.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) - 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+  max.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) + 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+  # Set hight threshold on the number of transcripts
+  max.nUMI.thr <- median(log10(Cell.QC.Stat$nCount_RNA)) + 3*mad(log10(Cell.QC.Stat$nCount_RNA))
+  
+  p2 <- ggplot(Cell.QC.Stat, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) +
+      geom_point() +
+      geom_smooth(method="lm") +
+      geom_hline(aes(yintercept = min.Genes.thr), colour = "green", linetype = 2) +
+      geom_hline(aes(yintercept = max.Genes.thr), colour = "green", linetype = 2) +
+      geom_vline(aes(xintercept = max.nUMI.thr), colour = "red", linetype = 2)
+  
+  p3 <- p1 / p2
+  #p1=ggExtra::ggMarginal(p1, type = "histogram", fill="lightgrey", bins=100)
+  #p2=ggExtra::ggMarginal(p2, type = "histogram", fill="lightgrey")
+  #print(typeof(p1))
+  #p3 <- p1 / p2
+  p3 <- p3 + plot_annotation(title = names(Glasgow3.list[[i]]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(p3)
+
+  # Filter cells based on these thresholds
+  
+  Cell.QC.Stat <- Cell.QC.Stat %>% filter(log10(nFeature_RNA) > min.Genes.thr) %>% filter(log10(nCount_RNA) < max.nUMI.thr)
+  print(nrow(Cell.QC.Stat))
+  print("########")
+  Glasgow3.list[[i]] <- subset(Glasgow3.list[[i]], cells = rownames(Cell.QC.Stat))
+  rm(Cell.QC.Stat)
+}
+```
+
+```{r, fig.width=12}
+for (i in 1:length(Glasgow3.list)) {
+  plot1 <- FeatureScatter(Glasgow3.list[[i]], feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(Glasgow3.list[[i]], feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot3 <- FeatureScatter(Glasgow3.list[[i]], feature1 = "percent.ribo", feature2 = "percent.hb")
+  plot4 <- VlnPlot(Glasgow3.list[[i]], features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+  plot <- ((plot1 + plot2) / (plot3 + plot4))
+  plot = plot + plot_annotation(title = names(Glasgow3.list[[i]]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+}
+
+length(Glasgow3.list)==length(Glasgow3.list.data)
+```
+
+## Hashtags
+
+```{r}
+#A1 1 sample
+
+#A2
+Glasgow3.list[["A2"]] <- Add.HTO(Glasgow3.list[["A2"]], "/datastore/Dom/Saved/WholeST/A2/filtered_feature_bc_matrix/", minCountPerCell = 5, barcodeWhitelist = c("HTO1","HTO2"), c("bff_cluster","multiseq", "htodemux","dropletutils"), datatypeName="Antibody Capture")
+```
+
+```{r}
+#A3
+Glasgow3.list[["A3"]] <- Add.HTO(Glasgow3.list[["A3"]], "/datastore/Dom/Saved/WholeST/A3/filtered_feature_bc_matrix/", minCountPerCell = 5, barcodeWhitelist = c("HTO1","HTO4"), c("bff_cluster","multiseq", "htodemux","dropletutils"), datatypeName="Antibody Capture")
+```
+
+```{r}
+#A5
+Glasgow3.list[["A5"]] <- Add.HTO(Glasgow3.list[["A5"]], "/datastore/Dom/Saved/WholeST/A5/filtered_feature_bc_matrix/", minCountPerCell = 5, barcodeWhitelist = c("HTO3","HTO5"), c("bff_cluster","multiseq", "htodemux","dropletutils"), datatypeName="Antibody Capture")
+```
+
+```{r}
+#A7
+Glasgow3.list[["A7"]] <- Add.HTO(Glasgow3.list[["A7"]], "/datastore/Dom/Saved/WholeST/A7/filtered_feature_bc_matrix/", minCountPerCell = 5, barcodeWhitelist = c("HTO4","HTO5"), c("bff_cluster","multiseq", "htodemux","dropletutils"), datatypeName="Antibody Capture")
+
+#A8,A9,A10 Single sample
+```
+
+#Add ADT
+
+```{r}
+add.ADT.new <- function(path, HTO.id, Seurat.obj=NULL, add.name.assay="ADT") {
+  #TO DO: add if control path end with "/" or add it
+  cells2 = Seurat::Read10X(paste0(path,"filtered_feature_bc_matrix/"))
+  
+  # define cell-containing barcodes and separate cells and empty drops
+  prot.cells2 = cells2$`Antibody Capture`
+    
+  # Remove hashtags
+  prot.cells2 = prot.cells2[!(rownames(prot.cells2) %in% HTO.id),]
+  
+  if (is.null(Seurat.obj)) {
+    return(prot.cells2)
+  } else {
+    # select only cells
+    prot.cells2 = prot.cells2[,colnames(Seurat.obj)]
+  
+    # create a new assay to store ADT information
+    adt_assay <- CreateAssayObject(counts = prot.cells2)
+  
+    # add this assay to the previously created Seurat object
+    Seurat.obj[["ADT"]] <- adt_assay
+    Seurat.obj <- NormalizeData(Seurat.obj, normalization.method = "CLR", margin = 2, assay = "ADT")
+    return(Seurat.obj)
+  }
+}
+```
+
+```{r}
+HTO.id=c("HTO1","HTO2","HTO3","HTO4","HTO5","HTO6")
+
+Glasgow3.list[["A1"]] = add.ADT.new("/datastore/Dom/Saved/WholeST/A1/", HTO.id=HTO.id, Seurat.obj = Glasgow3.list[["A1"]])
+Glasgow3.list[["A2"]] = add.ADT.new("/datastore/Dom/Saved/WholeST/A2/", HTO.id=HTO.id, Seurat.obj = Glasgow3.list[["A2"]])
+Glasgow3.list[["A3"]] = add.ADT.new("/datastore/Dom/Saved/WholeST/A3/", HTO.id=HTO.id, Seurat.obj = Glasgow3.list[["A3"]])
+Glasgow3.list[["A5"]] = add.ADT.new("/datastore/Dom/Saved/WholeST/A5/", HTO.id=HTO.id, Seurat.obj = Glasgow3.list[["A5"]])
+Glasgow3.list[["A7"]] = add.ADT.new("/datastore/Dom/Saved/WholeST/A7/", HTO.id=HTO.id, Seurat.obj = Glasgow3.list[["A7"]])
+Glasgow3.list[["A8"]] = add.ADT.new("/datastore/Dom/Saved/WholeST/A8/", HTO.id=HTO.id, Seurat.obj = Glasgow3.list[["A8"]])
+```
+
+#SNPs
+
+```{r}
+Glasgow3.list[["A3"]] = Add.SNPs.HT(Glasgow3.list[["A3"]],"/datastore/Dom/souporcell_datasets/WholeST/A3_results/clusters.tsv")
+Glasgow3.list[["A7"]] = Add.SNPs.HT(Glasgow3.list[["A7"]],"/datastore/Dom/souporcell_datasets/WholeST/A7_results/clusters.tsv")
+```
+
+
+##Singlets
+
+```{r}
+Glasgow3.list.HTO.list=c()
+#Glasgow3.list.HTO.list.names=c()
+
+souporcell.or.HTO <- function(Seurat.object, verbose=FALSE) {
+  print("checking...")
+  Seurat.object.singlets.list = c()
+  if (verbose){
+    print("SNPs present?")
+    print(any(colnames(Seurat.object@meta.data) == "SNP_status"))
+  }
+  
+  #IF SNP are present
+  if (any(colnames(Seurat.object@meta.data) == "SNP_status")) {
+    if (verbose){
+      print("SNP_status singlet > Seurat.object$HTO_status?")
+      print(table(Seurat.object$SNP_status)["singlet"] > table(Seurat.object$HTO_status)["Singlet"]) 
+      }
+    if (!any(colnames(Seurat.object@meta.data) == "HTO_status") || table(Seurat.object$SNP_status)["singlet"] > table(Seurat.object$HTO_status)["Singlet"]) {
+      print("Souporcell is better...")
+      Idents(Seurat.object) <- "SNP_status"
+      
+      #Subset SNPs singlets
+      Seurat.object.singlets <- subset(Seurat.object, idents = "singlet")
+      print("Singlets selected...")
+      Idents(Seurat.object.singlets) <-"SNP_cluster"
+      Seurat.object.singlets.list=SplitObject(Seurat.object.singlets, split.by = "SNP_cluster")
+      print("Singlets splitted...")
+    } else {
+        print("HTO is better...")
+        Idents(Seurat.object) <- "HTO_status"
+        Seurat.object.singlets <- subset(Seurat.object, idents = "Singlet")
+        print("Singlets selected...")
+        Idents(Seurat.object.singlets) <-"HTO"
+        Seurat.object.singlets.list=SplitObject(Seurat.object.singlets, split.by = "HTO")
+        print("Singlets splitted...")
+      }
+  } else {
+    if (any(colnames(Seurat.object@meta.data) == "HTO_status")) {
+        print("HTO is better...")
+        Idents(Seurat.object) <- "HTO_status"
+        Seurat.object.singlets <- subset(Seurat.object, idents = "Singlet")
+        print("Singlets selected...")
+        Idents(Seurat.object.singlets) <-"HTO"
+        Seurat.object.singlets.list=SplitObject(Seurat.object.singlets, split.by = "HTO")
+        print("Singlets splitted...")
+    } else {
+      print("No hashtag info")
+      if (verbose==TRUE) {
+        print(Seurat.object)
+        print(Seurat.object.singlets.list)
+      }
+      Seurat.object.singlets.list = Seurat.object
+    }
+  }
+  if (verbose==TRUE) {
+    print(names(Seurat.object.singlets.list))
+    print(length(Seurat.object.singlets.list))
+    print("return")
+  }
+  return(Seurat.object.singlets.list)
+}
+
+for (name in names(Glasgow3.list)) {
+  print(name)
+  print(Glasgow3.list[[name]])
+  Seurat.object.list = souporcell.or.HTO(Glasgow3.list[[name]])
+  # 
+  #   print("out")
+  #   print(length(Seurat.object.list))
+  #   print(length(names(Seurat.object.list)))
+  #   print(Seurat.object.list)
+  #   print(names(Seurat.object.list))
+  # 
+  #Glasgow3.list.HTO.list = append(Glasgow3.list.HTO.list, Seurat.object.list)
+  
+  if (length(Seurat.object.list)==1) {
+    Glasgow3.list.HTO.list[[name]] = Seurat.object.list
+  } else {
+    new_names = paste(name, names(Seurat.object.list), sep="_")
+    names(Seurat.object.list) = new_names
+    Glasgow3.list.HTO.list = append(Glasgow3.list.HTO.list, Seurat.object.list)
+  }
+  # if (names(Seurat.object.list)[1]=="RNA") {
+  #   Glasgow3.list.HTO.list.names = append(Glasgow3.list.HTO.list.names, name)
+  # } else { Glasgow3.list.HTO.list.names = append(Glasgow3.list.HTO.list.names, paste(name, names(Seurat.object.list), sep="_")) 
+  # }
+}
+
+#names(Glasgow3.list.HTO.list) <- Glasgow3.list.HTO.list.names
+print("You need a metadata file with:")
+names(Glasgow3.list.HTO.list)
+```
+
+# Visual QC
+
+```{r}
+Glasgow3.list.HTO.list
+```
+
+## A2_HTO1 as only 27 cells
+
+```{r}
+Glasgow3.list.HTO.list["A2_HTO1"] <- NULL
+```
+
+
+## A3 is not clear
+
+```{r}
+table(Glasgow3.list.HTO.list[["A3_1"]]$HTO)
+table(Glasgow3.list.HTO.list[["A3_0"]]$HTO)
+```
+
+```{r}
+A3 = Glasgow3.list[["A3"]]
+```
+
+```{r}
+table(A3$HTO_status)
+table(A3$SNP_status)
+table(A3$HTO_status, A3$SNP_status)
+table(A3$HTO, A3$SNP_cluster)
+```
+
+For A3 there are no cells for HTO1...
+
+```{r}
+DefaultAssay(A3) <- "RNA"
+A3 <- NormalizeData(A3)
+A3 <- FindVariableFeatures(A3, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+all.genes <- rownames(A3)
+A3 <- ScaleData(A3, features = all.genes)
+
+A3 <- RunPCA(object = A3, npcs = 40)
+ElbowPlot(object = A3, ndims  = 40)
+DimPlot(A3, reduction = "pca")
+```
+
+```{r}
+A3 <- RunUMAP(A3, dims = 1:30)
+A3 <- FindNeighbors(A3, dims = 1:30) %>% FindClusters(resolution = 0.2)
+```
+
+```{r}
+DimPlot(A3, label = TRUE)
+DimPlot(A3, group.by = "HTO_status")
+DimPlot(A3, group.by = "HTO")
+DimPlot(A3, group.by = "SNP_status")
+DimPlot(A3, group.by = "SNP_cluster")
+
+```
+
+```{r, fig.width=10}
+FeaturePlot(A3, c("CD1C","CLEC10A","CD14","S100A9","IGKC", "ITGAX", "BIRC5", "CD3D", "MARCO","SPP1","S100A12","TREM2"))
+```
+
+From visual inspection seems only 1 patient: HTO4
+
+```{r}
+
+Glasgow3.list.HTO.list["A3_1"] <- NULL
+Glasgow3.list.HTO.list["A3_0"] <- NULL
+table(Glasgow3.list[["A3"]]$HTO)
+Glasgow3.list[["A3"]]$HTO <- "HTO4"
+table(Glasgow3.list[["A3"]]$HTO_status)
+Glasgow3.list[["A3"]]$HTO_status <- "Singlet"
+Glasgow3.list[["A3"]]$SNP_cluster <- NULL
+Glasgow3.list[["A3"]]$SNP_status <- NULL
+
+Glasgow3.list.HTO.list[["A3"]] <- Glasgow3.list[["A3"]]
+```
+
+```{r}
+print("You need a metadata file with:")
+names(Glasgow3.list.HTO.list)
+```
+
+
+## Umap and Doublet Finder
+
+```{r, fig.width=10}
+for (name in names(Glasgow3.list.HTO.list)){
+  print(name)
+  Seurat.object = Glasgow3.list.HTO.list[[name]]
+  print(Seurat.object)
+  DefaultAssay(Seurat.object) <- "RNA"
+  Seurat.object <- NormalizeData(Seurat.object)
+  Seurat.object <- FindVariableFeatures(Seurat.object, selection.method = "vst", nfeatures = 2000)
+  
+  # Identify the 10 most highly variable genes
+  Seurat.object <- ScaleData(Seurat.object)
+  
+  Seurat.object <- RunPCA(object = Seurat.object, npcs = 30)
+  #ElbowPlot(object = Seurat.object, ndims  = 30)
+  #DimPlot(Seurat.object, reduction = "pca")
+  
+  Seurat.object <- RunUMAP(Seurat.object, dims = 1:30)
+  Seurat.object <- FindNeighbors(Seurat.object, dims = 1:30) %>% FindClusters(resolution = 0.1)
+  
+  plot=DimPlot(Seurat.object, label = TRUE)
+  plot = plot + plot_annotation(title = name, theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+  
+  print(FeaturePlot(Seurat.object, c("CD1C","CLEC10A","CD14","S100A9","IGKC", "ITGAX", "CD3D", "MARCO","SPP1"), ncol = 3))
+  
+  Seurat.object = DoubletMark(Seurat.object, n.cell.recovered=Seurat.object@misc$cell.recovered)
+
+  print(DimPlot(Seurat.object, group.by = "Doublets Low Confidence"))
+  print(DimPlot(Seurat.object, group.by = "Doublets High Confidence"))
+}
+```
+
+## Metadata
+
+```{r}
+metadata = read.csv("metadata_Jun23_toA10.csv")
+rownames(metadata) <- metadata$Unique_ID
+metadata
+```
+
+```{r}
+for (name in names(Glasgow3.list.HTO.list)) {
+  print(name)
+  #print(WST.project.HTO.list[[name]])
+  #print(metadata[name,])
+  Glasgow3.list.HTO.list[[name]]=make.add.meta(Glasgow3.list.HTO.list[[name]], metadata[name,])
+}
+
+Glasgow3.list.HTO.list
+names(Glasgow3.list.HTO.list)
+```
+
+# Integration
+
+```{r}
+Glasgow3 <- merge(Glasgow3.list.HTO.list[[1]], y = Glasgow3.list.HTO.list[2:length(Glasgow3.list.HTO.list)], project = "CD45+ ST CITEseq")
+Glasgow3
+```
+
+```{r}
+DefaultAssay(Glasgow3) <- "RNA"
+Glasgow3 <- NormalizeData(Glasgow3)
+Glasgow3 <- FindVariableFeatures(Glasgow3, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+Glasgow3 <- ScaleData(Glasgow3)
+
+Glasgow3 <- RunPCA(object = Glasgow3, npcs = 40)
+ElbowPlot(object = Glasgow3, ndims  = 40)
+DimPlot(Glasgow3, reduction = "pca")
+```
+
+```{r}
+gc()
+table(Glasgow3$SampleID)
+table(Glasgow3$Unique_ID)
+```
+
+```{r}
+Glasgow3 <- RunHarmony(Glasgow3, group.by.vars = "Unique_ID")
+```
+
+```{r}
+Glasgow3 <- RunUMAP(Glasgow3, reduction = "harmony", dims = 1:30)
+Glasgow3 <- FindNeighbors(Glasgow3, reduction = "harmony", dims = 1:30) %>% FindClusters(resolution = 0.1)
+```
+
+```{r, fig.width=10}
+DimPlot(Glasgow3, label = TRUE)
+DimPlot(Glasgow3, group.by = "HTO_status")
+DimPlot(Glasgow3, split.by = "Condition", ncol = 3)
+ProportionPlot(Glasgow3, "seurat_clusters", "Condition")
+table(Glasgow3$Condition, Glasgow3$seurat_clusters)
+```
+
+```{r, fig.height=10}
+FeaturePlot(Glasgow3, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9","rna_IGKC", "rna_ITGAX", "rna_BIRC5", "rna_CD3D", "rna_MARCO","rna_SPP1","rna_S100A12","rna_TREM2","rna_TNF","rna_CD79A","rna_LYVE1","rna_TREM2"), order = TRUE)
+FeaturePlot(Glasgow3, c("Hu.CD11c","Hu.CD11b","Hu.CD11a","Hu.CD14-M5E2","Hu.CD36","Hu.HLA.DR.DP.DQ","Hu.FceRIa","Hu.CD88","Hu.Podoplanin","Hu.CD9","Hu.CD5","Hu.CD88", "Hu.CD1c"))
+```
+
+```{r}
+Glasgow3@misc$Markers = FindAllMarkers(Glasgow3, min.pct = 0.4, logfc.threshold = 0.75, test.use = "MAST", assay = "RNA")
+```
+
+```{r}
+Glasgow3$celltype <- plyr::revalue(as.character(Glasgow3$seurat_clusters),
+                                        c("3"='Plasmacells',
+                                          "0"='Macrophage',
+                                          "1"="T cells",
+                                          "2"='DCs',
+                                          "5"='FLS',
+                                          "6"="? TNF+",
+                                          "4"="B cells",
+                                          "7"="7",
+                                          "8"="Cycling Cells",
+                                          "9"="9",
+                                          "10"="Endot"))
+Idents(Glasgow3) <- "celltype"
+```
+
+```{r}
+DimPlot(Glasgow3, label = TRUE)
+DimPlot(Glasgow3, group.by = "HTO_status")
+DimPlot(Glasgow3, split.by = "Condition", ncol = 3)
+ProportionPlot(Glasgow3, "seurat_clusters", "Condition")
+table(Glasgow3$Condition, Glasgow3$seurat_clusters)
+```
+
+
+# ADT integration object`
+
+```{r}
+DefaultAssay(Glasgow3) <- "ADT"
+ADT.list = SplitObject(Glasgow3, split.by = "Unique_ID")
+ADT.list["A9-RNA"] <- NULL
+ADT.list["A10-RNA"] <- NULL
+```
+
+```{r}
+features <- SelectIntegrationFeatures(object.list = ADT.list)
+
+for (i in 1:length(ADT.list)) {
+  # select features that are repeatedly variable across datasets for integration run PCA on each
+  # dataset using these features
+  ADT.list[[i]] <- DietSeurat(ADT.list[[i]], assays = "ADT")
+  ADT.list[[i]] <- ScaleData(ADT.list[[i]], features = features, verbose = FALSE)
+  ADT.list[[i]] <- RunPCA(ADT.list[[i]], features = features, verbose = FALSE)
+}
+```
+
+```{r}
+immune.anchors <- FindIntegrationAnchors(object.list = ADT.list, anchor.features = features, reduction = "rpca", scale = FALSE)
+
+# this command creates an 'integrated' data assay
+ADT.Object <- IntegrateData(anchorset = immune.anchors, new.assay.name = "Integrated.ADT")
+
+#Now we can run a single integrated analysis on all cells!
+
+# specify that we will perform downstream analysis on the corrected data note that the
+# original unmodified data still resides in the 'RNA' assay
+DefaultAssay(ADT.Object) <- "Integrated.ADT"
+
+# Run the standard workflow for visualization and clustering
+ADT.Object <- ScaleData(ADT.Object, verbose = FALSE, do.scale = FALSE,  do.center = TRUE)
+ADT.Object <- RunPCA(ADT.Object, npcs = 30, verbose = FALSE)
+ElbowPlot(object = ADT.Object, ndims  = 30)
+```
+
+```{r}
+ADT.Object <- RunUMAP(ADT.Object, reduction = "pca", dims = 1:15)
+ADT.Object <- FindNeighbors(ADT.Object, reduction = "pca", dims = 1:15)
+ADT.Object <- FindClusters(ADT.Object, resolution = 0.5)
+```
+
+```{r, fig.width=10}
+DimPlot(ADT.Object, label = TRUE)
+DimPlot(ADT.Object, split.by = "Condition", ncol = 3)
+#DimPlot(ADT.Object, group.by = "celltype", label = TRUE, repel = TRUE)
+#DimPlot(ADT.Object, group.by = "celltype", split.by = "celltype", ncol = 3)
+ProportionPlot(ADT.Object, "seurat_clusters", "Condition")
+#ProportionPlot(ADT.Object, "seurat_clusters", "celltype")
+#ProportionPlot(ADT.Object, "celltype", "seurat_clusters")
+table(ADT.Object$Condition, ADT.Object$seurat_clusters)
+ADT.Object
+table(ADT.Object$Condition)
+```
+
+#Transfer ADT info to Original
+
+```{r}
+Glasgow3.No9_10 = subset(Glasgow3, cells = colnames(ADT.Object))
+Glasgow3.No9_10[["Integrated.ADT"]] <- ADT.Object[["Integrated.ADT"]]
+Glasgow3.No9_10[["pca.adt"]] <- ADT.Object[["pca"]]
+Glasgow3.No9_10[["umap.adt"]] <- ADT.Object[["umap"]]
+Glasgow3.No9_10
+```
+
+For each cell, we calculate its closest neighbors in the dataset based on a weighted combination of RNA and protein similarities. The cell-specific modality weights and multimodal neighbors are calculated in a single function, which takes ~2 minutes to run on this dataset. We specify the dimensionality of each modality (similar to specifying the number of PCs to include in scRNA-seq clustering), but you can vary these settings to see that small changes have minimal effect on the overall results.
+
+# WNN
+
+```{r}
+# Identify multimodal neighbors. These will be stored in the neighbors slot, 
+# and can be accessed using Glasgow3.No9_10[['weighted.nn']]
+# The WNN graph can be accessed at Glasgow3.No9_10[["wknn"]], 
+# and the SNN graph used for clustering at Glasgow3.No9_10[["wsnn"]]
+# Cell-specific modality weights can be accessed at Glasgow3.No9_10$RNA.weight
+Glasgow3.No9_10 <- FindMultiModalNeighbors(
+  Glasgow3.No9_10, reduction.list = list("harmony", "pca.adt"), 
+  dims.list = list(1:30, 1:25), modality.weight.name = "RNA.weight"
+)
+```
+
+We can now use these results for downstream analysis, such as visualization and clustering. For example, we can create a UMAP visualization of the data based on a weighted combination of RNA and protein data We can also perform graph-based clustering and visualize these results on the UMAP, alongside a set of cell annotations.
+
+```{r}
+Glasgow3.No9_10 <- RunUMAP(Glasgow3.No9_10, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+Glasgow3.No9_10 <- FindClusters(Glasgow3.No9_10, graph.name = "wsnn", algorithm = 3, resolution = 2, verbose = FALSE)
+
+DimPlot(Glasgow3.No9_10, reduction = 'wnn.umap', label = TRUE, repel = TRUE, label.size = 2.5) + NoLegend()
+DimPlot(Glasgow3.No9_10, reduction = 'wnn.umap', label = TRUE, repel = TRUE, label.size = 2.5, group.by = "celltype") + NoLegend()
+```
+
+```{r, fig.height=10}
+FeaturePlot(Glasgow3.No9_10, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9","rna_IGKC", "rna_ITGAX", "rna_BIRC5", "rna_CD3D", "rna_MARCO","rna_SPP1","rna_TNF","rna_S100A12"), order=TRUE)
+FeaturePlot(Glasgow3.No9_10, c("Hu.CD11c","Hu.CD11b","Hu.CD11a","Hu.CD14-M5E2","Hu.CD36","Hu.HLA.DR.DP.DQ","Hu.FceRIa","Hu.CD88","Hu.Podoplanin","Hu.CD9","Hu.CD5","Hu.CD88", "Hu.CD1c"), order = TRUE)
+```
+
+```{r}
+saveRDS(Glasgow3.No9_10, "/datastore/Dom/Saved/WholeST/Jun23_A1-A8+intron+ADT.rds")
+```
+
+#Myeloid
+
+```{r}
+Idents(Glasgow3.No9_10) <- "celltype"
+table(Glasgow3.No9_10$celltype)
+Myeloid = subset(Glasgow3.No9_10, idents = c("DCs","Macrophage"))
+```
+
+```{r, fig.width=8}
+Idents(Myeloid) <- "seurat_clusters"
+DimPlot(Myeloid, label=TRUE)
+```
+
+```{r}
+Idents(Myeloid) <- "seurat_clusters"
+Myeloid = subset(Myeloid, idents = c("13","6","7","19","8","14","15","28","27"), invert=TRUE)
+```
+
+
+```{r, fig.width=8}
+FeaturePlot(Myeloid, c("percent.ribo", "percent.hb", "percent.mt"))
+VlnPlot.median(Myeloid, c("percent.ribo", "percent.hb", "percent.mt"), legend = FALSE)
+```
+
+
+```{r,fig.width=15}
+VlnPlot.median(Myeloid, c("S100A12","CD1C","CLEC10A","CXCR4","SPP1","TREM2","LYVE1","ISG15","ICAM1", "MERTK","FOLR2","KLF2","VSIG4"), ncol = 4, legend = FALSE)
+FeaturePlot(Myeloid, c("S100A12","CD1C","CLEC10A","CXCR4","SPP1","TREM2","LYVE1","ISG15","ICAM1", "MERTK","FOLR2","KLF2","VSIG4"), ncol = 4)
+```
+
+## Reclustering 
+
+```{r}
+DefaultAssay(Myeloid) <- "RNA"
+Myeloid.again <- FindVariableFeatures(Myeloid, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+#all.genes <- rownames(Myeloid.again)
+Myeloid.again <- ScaleData(Myeloid.again)
+
+Myeloid.again <- RunPCA(object = Myeloid.again, npcs = 40)
+ElbowPlot(object = Myeloid.again, ndims  = 40)
+DimPlot(Myeloid.again, reduction = "pca")
+```
+
+```{r}
+Myeloid.again <- RunHarmony(Myeloid.again, group.by.vars = "Unique_ID")
+ElbowPlot(object = Myeloid.again, reduction = "harmony", ndims = 40)
+DimPlot(Myeloid.again, reduction = "harmony")
+```
+
+```{r}
+Myeloid.again <- RunUMAP(Myeloid.again, reduction = "harmony", dims = 1:20)
+Myeloid.again <- FindNeighbors(Myeloid.again, reduction = "harmony", dims = 1:20) %>% FindClusters(resolution = 0.2)
+Myeloid.again
+```
+
+```{r}
+DimPlot(Myeloid.again, label = TRUE)
+DimPlot(Myeloid.again, group.by = "HTO_status")
+DimPlot(Myeloid.again, split.by = "Condition", ncol = 3)
+ProportionPlot(Myeloid.again, "seurat_clusters", "Condition")
+table(Myeloid.again$Condition, Myeloid.again$seurat_clusters)
+```
+
+```{r}
+FeaturePlot(Myeloid.again, c("CD1C","CLEC10A","S100A12","SPP1","TREM2","LYVE1"), ncol = 3, order = TRUE, reduction = "umap")
+FeaturePlot(Myeloid.again, c("SPP1","S100A12","LYVE1"), split.by = "Condition", order = TRUE, reduction = "umap")
+```
+
+```{r}
+DimPlot(Myeloid.again)
+DimPlot(Myeloid.again, reduction = "umap")
+table(Myeloid.again$seurat_clusters)
+```
+
+# ADT integration object
+
+```{r}
+DefaultAssay(Myeloid.again) <- "ADT"
+ADT.list = SplitObject(Myeloid.again, split.by = "Unique_ID")
+```
+
+```{r}
+features <- SelectIntegrationFeatures(object.list = ADT.list)
+
+for (i in 1:length(ADT.list)) {
+  # select features that are repeatedly variable across datasets for integration run PCA on each
+  # dataset using these features
+  ADT.list[[i]] <- DietSeurat(ADT.list[[i]], assays = "ADT")
+  ADT.list[[i]] <- ScaleData(ADT.list[[i]], features = features, verbose = FALSE)
+  ADT.list[[i]] <- RunPCA(ADT.list[[i]], features = features, verbose = FALSE)
+}
+```
+
+```{r}
+immune.anchors <- FindIntegrationAnchors(object.list = ADT.list, anchor.features = features, reduction = "rpca", scale = FALSE)
+
+# this command creates an 'integrated' data assay
+immune.combined <- IntegrateData(anchorset = immune.anchors, new.assay.name = "Integrated.ADT", k.weight = 50)
+
+#Now we can run a single integrated analysis on all cells!
+
+# specify that we will perform downstream analysis on the corrected data note that the
+# original unmodified data still resides in the 'RNA' assay
+DefaultAssay(immune.combined) <- "Integrated.ADT"
+
+# Run the standard workflow for visualization and clustering
+immune.combined <- ScaleData(immune.combined, verbose = FALSE, do.scale = FALSE,  do.center = TRUE)
+immune.combined <- RunPCA(immune.combined, npcs = 30, verbose = FALSE)
+ElbowPlot(object = immune.combined, ndims  = 30)
+```
+
+```{r}
+immune.combined <- RunUMAP(immune.combined, reduction = "pca", dims = 1:15)
+immune.combined <- FindNeighbors(immune.combined, reduction = "pca", dims = 1:15)
+immune.combined <- FindClusters(immune.combined, resolution = 0.5)
+```
+
+```{r, fig.width=10}
+DimPlot(immune.combined, label = TRUE)
+DimPlot(immune.combined, split.by = "Condition", ncol = 3)
+DimPlot(immune.combined, group.by = "celltype", label = TRUE, repel = TRUE)
+DimPlot(immune.combined, group.by = "celltype", split.by = "celltype", ncol = 3)
+ProportionPlot(immune.combined, "seurat_clusters", "Condition")
+ProportionPlot(immune.combined, "seurat_clusters", "celltype")
+ProportionPlot(immune.combined, "celltype", "seurat_clusters")
+table(immune.combined$Condition, immune.combined$seurat_clusters)
+immune.combined
+table(immune.combined$Condition)
+```
+
+#Transfer ADT info to Original
+
+```{r}
+Myeloid.again[["Integrated.ADT"]] <- immune.combined[["Integrated.ADT"]]
+Myeloid.again[["pca.adt"]] <- immune.combined[["pca"]]
+Myeloid.again[["umap.adt"]] <- immune.combined[["umap"]]
+Myeloid.again
+```
+
+For each cell, we calculate its closest neighbors in the dataset based on a weighted combination of RNA and protein similarities. The cell-specific modality weights and multimodal neighbors are calculated in a single function, which takes ~2 minutes to run on this dataset. We specify the dimensionality of each modality (similar to specifying the number of PCs to include in scRNA-seq clustering), but you can vary these settings to see that small changes have minimal effect on the overall results.
+
+# WNN
+
+```{r}
+# Identify multimodal neighbors. These will be stored in the neighbors slot, 
+# and can be accessed using bm[['weighted.nn']]
+# The WNN graph can be accessed at bm[["wknn"]], 
+# and the SNN graph used for clustering at bm[["wsnn"]]
+# Cell-specific modality weights can be accessed at bm$RNA.weight
+Myeloid.again <- FindMultiModalNeighbors(
+  Myeloid.again, reduction.list = list("harmony", "pca.adt"), 
+  dims.list = list(1:30, 1:15), modality.weight.name = "RNA.weight"
+)
+```
+
+We can now use these results for downstream analysis, such as visualization and clustering. For example, we can create a UMAP visualization of the data based on a weighted combination of RNA and protein data We can also perform graph-based clustering and visualize these results on the UMAP, alongside a set of cell annotations.
+
+```{r}
+Myeloid.again <- RunUMAP(Myeloid.again, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+Myeloid.again <- FindClusters(Myeloid.again, graph.name = "wsnn", algorithm = 3, resolution = 2, verbose = FALSE)
+
+DimPlot(Myeloid.again, reduction = 'wnn.umap', label = TRUE, repel = TRUE, label.size = 2.5) + NoLegend()
+```
+
+```{r, fig.height=8}
+FeaturePlot(Myeloid.again, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9", "rna_ITGAX", "rna_BIRC5", "rna_CD3D", "rna_MARCO","rna_SPP1","rna_S100A12","rna_MERTK","rna_FOLR2"), order = TRUE)
+```
+
+
+# No Introns
+
+## Read data and Ambient RNA removal
+
+```{r}
+Glasgow3.list.data = c()
+to.add.manually = c("oldMapping","nointron")
+
+path.to.read = "/datastore/Dom/Saved/WholeST/nointron/"
+Glas3.run = list.dirs(path = path.to.read, full.names = FALSE, recursive = FALSE)
+for (name in Glas3.run) {
+  if (name %in% to.add.manually) {} 
+  else {
+    print(name)
+#    run_name=paste("RUN1", name, sep = "_")
+    Glasgow3.list.data[[name]]=SoupX.clean.from.CellRanger(paste(path.to.read,"/",sep=name))
+  }
+}
+
+names(Glasgow3.list.data)
+```
+
+## Seurat Object creation
+
+```{r, fig.width=12}
+Glasgow3.list = c()
+
+for (i in 1:length(Glasgow3.list.data)) {
+  print(i)
+  name = names(Glasgow3.list.data[i])
+  print(name)
+  Seurat.object = CreateSeuratObject(counts = Glasgow3.list.data[[i]], project = name)
+  Seurat.object[["percent.mt"]] <- PercentageFeatureSet(Seurat.object, pattern = "^MT-")
+  Seurat.object[["percent.hb"]] <- PercentageFeatureSet(Seurat.object, pattern = "^HB[^(P)]")
+  Seurat.object[["percent.ribo"]] <- PercentageFeatureSet(Seurat.object, pattern = ("RPS|RPL"))
+  #VlnPlot(Seurat.object, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+  plot1 <- FeatureScatter(Seurat.object, feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(Seurat.object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot3 <- FeatureScatter(Seurat.object, feature1 = "percent.ribo", feature2 = "percent.hb")
+  plot4 <- VlnPlot(Seurat.object, features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+  plot <- ((plot1 + plot2) / (plot3 + plot4))
+  plot = plot + plot_annotation(title = name, theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+  
+  # print("New seurat object:")
+  # print(Seurat.object)
+  # print("Old list:")
+  # print(Oxford.list)
+  
+  Glasgow3.list[[name]] = Seurat.object
+  # print("New list:")
+  # print(Oxford.list)
+  rm(Seurat.object)
+}
+
+Glasgow3.list
+```
+
+### QC
+
+Based on https://matthieuxmoreau.github.io/EarlyPallialNeurogenesis/html-Reports/Quality_Control.html code
+
+```{r, fig.width=6, fig.height=8}
+for (i in 1:length(Glasgow3.list)) {
+  #print(i)
+  Cell.QC.Stat <- Glasgow3.list[[i]]@meta.data
+  print(nrow(Cell.QC.Stat))
+  # high and low median absolute deviation (mad) thresholds to exclude outlier cells
+  max.mito.thr <- median(Cell.QC.Stat$percent.mt) + 3*mad(Cell.QC.Stat$percent.mt)
+  min.mito.thr <- median(Cell.QC.Stat$percent.mt) - 3*mad(Cell.QC.Stat$percent.mt)
+  #print("OK")
+  #Plot
+  p1 <- ggplot(Cell.QC.Stat, aes(x=nFeature_RNA, y=percent.mt)) +
+      geom_point() +
+      geom_hline(aes(yintercept = max.mito.thr), colour = "red", linetype = 2) +
+      geom_hline(aes(yintercept = min.mito.thr), colour = "red", linetype = 2) +
+      annotate(geom = "text", label = paste0(as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[2])," cells removed\n", as.numeric(table(Cell.QC.Stat$percent.mt > max.mito.thr | Cell.QC.Stat$percent.mt < min.mito.thr)[1])," cells remain"), x = 6000, y = 0.1)
+  #print("OK2")
+  Cell.QC.Stat <- Cell.QC.Stat %>% filter(percent.mt < max.mito.thr) %>% filter(percent.mt > min.mito.thr)
+  #print("OK3")
+  # Set low and hight thresholds on the number of detected genes
+  min.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) - 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+  max.Genes.thr <- median(log10(Cell.QC.Stat$nFeature_RNA)) + 3*mad(log10(Cell.QC.Stat$nFeature_RNA))
+  # Set hight threshold on the number of transcripts
+  max.nUMI.thr <- median(log10(Cell.QC.Stat$nCount_RNA)) + 3*mad(log10(Cell.QC.Stat$nCount_RNA))
+  
+  p2 <- ggplot(Cell.QC.Stat, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) +
+      geom_point() +
+      geom_smooth(method="lm") +
+      geom_hline(aes(yintercept = min.Genes.thr), colour = "green", linetype = 2) +
+      geom_hline(aes(yintercept = max.Genes.thr), colour = "green", linetype = 2) +
+      geom_vline(aes(xintercept = max.nUMI.thr), colour = "red", linetype = 2)
+  
+  p3 <- p1 / p2
+  #p1=ggExtra::ggMarginal(p1, type = "histogram", fill="lightgrey", bins=100)
+  #p2=ggExtra::ggMarginal(p2, type = "histogram", fill="lightgrey")
+  #print(typeof(p1))
+  #p3 <- p1 / p2
+  p3 <- p3 + plot_annotation(title = names(Glasgow3.list[[i]]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(p3)
+
+  # Filter cells based on these thresholds
+  
+  Cell.QC.Stat <- Cell.QC.Stat %>% filter(log10(nFeature_RNA) > min.Genes.thr) %>% filter(log10(nCount_RNA) < max.nUMI.thr)
+  print(nrow(Cell.QC.Stat))
+  print("########")
+  Glasgow3.list[[i]] <- subset(Glasgow3.list[[i]], cells = rownames(Cell.QC.Stat))
+  rm(Cell.QC.Stat)
+}
+```
+
+```{r, fig.width=12}
+for (i in 1:length(Glasgow3.list)) {
+  plot1 <- FeatureScatter(Glasgow3.list[[i]], feature1 = "nCount_RNA", feature2 = "percent.mt")
+  plot2 <- FeatureScatter(Glasgow3.list[[i]], feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+  plot3 <- FeatureScatter(Glasgow3.list[[i]], feature1 = "percent.ribo", feature2 = "percent.hb")
+  plot4 <- VlnPlot(Glasgow3.list[[i]], features = c("percent.ribo", "percent.hb", "percent.mt"), ncol = 3)
+  plot <- ((plot1 + plot2) / (plot3 + plot4))
+  plot = plot + plot_annotation(title = names(Glasgow3.list[[i]]), theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+}
+
+length(Glasgow3.list)==length(Glasgow3.list.data)
+```
+
+## Hashtags
+
+```{r}
+#A1 1 sample
+
+#A2
+Glasgow3.list[["A2"]] <- Add.HTO(Glasgow3.list[["A2"]], "/datastore/Dom/Saved/WholeST/nointron/A2/filtered_feature_bc_matrix/", minCountPerCell = 5, barcodeWhitelist = c("HTO1","HTO2"), c("bff_cluster","multiseq", "htodemux","dropletutils"), datatypeName="Antibody Capture")
+```
+
+```{r}
+#A3
+Glasgow3.list[["A3"]] <- Add.HTO(Glasgow3.list[["A3"]], "/datastore/Dom/Saved/WholeST/nointron/A3/filtered_feature_bc_matrix/", minCountPerCell = 5, barcodeWhitelist = c("HTO1","HTO4"), c("bff_cluster","multiseq", "htodemux","dropletutils"), datatypeName="Antibody Capture")
+```
+
+```{r}
+#A5
+Glasgow3.list[["A5"]] <- Add.HTO(Glasgow3.list[["A5"]], "/datastore/Dom/Saved/WholeST/nointron/A5/filtered_feature_bc_matrix/", minCountPerCell = 5, barcodeWhitelist = c("HTO3","HTO5"), c("bff_cluster","multiseq", "htodemux","dropletutils"), datatypeName="Antibody Capture")
+```
+
+```{r}
+#A7
+Glasgow3.list[["A7"]] <- Add.HTO(Glasgow3.list[["A7"]], "/datastore/Dom/Saved/WholeST/nointron/A7/filtered_feature_bc_matrix/", minCountPerCell = 5, barcodeWhitelist = c("HTO4","HTO5"), c("bff_cluster","multiseq", "htodemux","dropletutils"), datatypeName="Antibody Capture")
+
+#A8,A9,A10 Single sample
+```
+
+#Add ADT
+
+```{r}
+add.ADT.new <- function(path, HTO.id, Seurat.obj=NULL, add.name.assay="ADT") {
+  #TO DO: add if control path end with "/" or add it
+  cells2 = Seurat::Read10X(paste0(path,"filtered_feature_bc_matrix/"))
+  
+  # define cell-containing barcodes and separate cells and empty drops
+  prot.cells2 = cells2$`Antibody Capture`
+    
+  # Remove hashtags
+  prot.cells2 = prot.cells2[!(rownames(prot.cells2) %in% HTO.id),]
+  
+  if (is.null(Seurat.obj)) {
+    return(prot.cells2)
+  } else {
+    # select only cells
+    prot.cells2 = prot.cells2[,colnames(Seurat.obj)]
+  
+    # create a new assay to store ADT information
+    adt_assay <- CreateAssayObject(counts = prot.cells2)
+  
+    # add this assay to the previously created Seurat object
+    Seurat.obj[["ADT"]] <- adt_assay
+    Seurat.obj <- NormalizeData(Seurat.obj, normalization.method = "CLR", margin = 2, assay = "ADT")
+    return(Seurat.obj)
+  }
+}
+```
+
+```{r}
+HTO.id=c("HTO1","HTO2","HTO3","HTO4","HTO5","HTO6")
+
+Glasgow3.list[["A1"]] = add.ADT.new("/datastore/Dom/Saved/WholeST/nointron/A1/", HTO.id=HTO.id, Seurat.obj = Glasgow3.list[["A1"]])
+Glasgow3.list[["A2"]] = add.ADT.new("/datastore/Dom/Saved/WholeST/nointron/A2/", HTO.id=HTO.id, Seurat.obj = Glasgow3.list[["A2"]])
+Glasgow3.list[["A3"]] = add.ADT.new("/datastore/Dom/Saved/WholeST/nointron/A3/", HTO.id=HTO.id, Seurat.obj = Glasgow3.list[["A3"]])
+Glasgow3.list[["A5"]] = add.ADT.new("/datastore/Dom/Saved/WholeST/nointron/A5/", HTO.id=HTO.id, Seurat.obj = Glasgow3.list[["A5"]])
+Glasgow3.list[["A7"]] = add.ADT.new("/datastore/Dom/Saved/WholeST/nointron/A7/", HTO.id=HTO.id, Seurat.obj = Glasgow3.list[["A7"]])
+Glasgow3.list[["A8"]] = add.ADT.new("/datastore/Dom/Saved/WholeST/nointron/A8/", HTO.id=HTO.id, Seurat.obj = Glasgow3.list[["A8"]])
+```
+
+#SNPs
+
+```{r}
+Glasgow3.list[["A3"]] = Add.SNPs.HT(Glasgow3.list[["A3"]],"/datastore/Dom/souporcell_datasets/WholeST/A3_results/clusters.tsv")
+Glasgow3.list[["A7"]] = Add.SNPs.HT(Glasgow3.list[["A7"]],"/datastore/Dom/souporcell_datasets/WholeST/A7_results/clusters.tsv")
+```
+
+
+##Singlets
+
+```{r}
+Glasgow3.list.HTO.list=c()
+#Glasgow3.list.HTO.list.names=c()
+
+souporcell.or.HTO <- function(Seurat.object, verbose=FALSE) {
+  print("checking...")
+  Seurat.object.singlets.list = c()
+  if (verbose){
+    print("SNPs present?")
+    print(any(colnames(Seurat.object@meta.data) == "SNP_status"))
+  }
+  
+  #IF SNP are present
+  if (any(colnames(Seurat.object@meta.data) == "SNP_status")) {
+    if (verbose){
+      print("SNP_status singlet > Seurat.object$HTO_status?")
+      print(table(Seurat.object$SNP_status)["singlet"] > table(Seurat.object$HTO_status)["Singlet"]) 
+      }
+    if (!any(colnames(Seurat.object@meta.data) == "HTO_status") || table(Seurat.object$SNP_status)["singlet"] > table(Seurat.object$HTO_status)["Singlet"]) {
+      print("Souporcell is better...")
+      Idents(Seurat.object) <- "SNP_status"
+      
+      #Subset SNPs singlets
+      Seurat.object.singlets <- subset(Seurat.object, idents = "singlet")
+      print("Singlets selected...")
+      Idents(Seurat.object.singlets) <-"SNP_cluster"
+      Seurat.object.singlets.list=SplitObject(Seurat.object.singlets, split.by = "SNP_cluster")
+      print("Singlets splitted...")
+    } else {
+        print("HTO is better...")
+        Idents(Seurat.object) <- "HTO_status"
+        Seurat.object.singlets <- subset(Seurat.object, idents = "Singlet")
+        print("Singlets selected...")
+        Idents(Seurat.object.singlets) <-"HTO"
+        Seurat.object.singlets.list=SplitObject(Seurat.object.singlets, split.by = "HTO")
+        print("Singlets splitted...")
+      }
+  } else {
+    if (any(colnames(Seurat.object@meta.data) == "HTO_status")) {
+        print("HTO is better...")
+        Idents(Seurat.object) <- "HTO_status"
+        Seurat.object.singlets <- subset(Seurat.object, idents = "Singlet")
+        print("Singlets selected...")
+        Idents(Seurat.object.singlets) <-"HTO"
+        Seurat.object.singlets.list=SplitObject(Seurat.object.singlets, split.by = "HTO")
+        print("Singlets splitted...")
+    } else {
+      print("No hashtag info")
+      if (verbose==TRUE) {
+        print(Seurat.object)
+        print(Seurat.object.singlets.list)
+      }
+      Seurat.object.singlets.list = Seurat.object
+    }
+  }
+  if (verbose==TRUE) {
+    print(names(Seurat.object.singlets.list))
+    print(length(Seurat.object.singlets.list))
+    print("return")
+  }
+  return(Seurat.object.singlets.list)
+}
+
+for (name in names(Glasgow3.list)) {
+  print(name)
+  print(Glasgow3.list[[name]])
+  Seurat.object.list = souporcell.or.HTO(Glasgow3.list[[name]])
+  # 
+  #   print("out")
+  #   print(length(Seurat.object.list))
+  #   print(length(names(Seurat.object.list)))
+  #   print(Seurat.object.list)
+  #   print(names(Seurat.object.list))
+  # 
+  #Glasgow3.list.HTO.list = append(Glasgow3.list.HTO.list, Seurat.object.list)
+  
+  if (length(Seurat.object.list)==1) {
+    Glasgow3.list.HTO.list[[name]] = Seurat.object.list
+  } else {
+    new_names = paste(name, names(Seurat.object.list), sep="_")
+    names(Seurat.object.list) = new_names
+    Glasgow3.list.HTO.list = append(Glasgow3.list.HTO.list, Seurat.object.list)
+  }
+  # if (names(Seurat.object.list)[1]=="RNA") {
+  #   Glasgow3.list.HTO.list.names = append(Glasgow3.list.HTO.list.names, name)
+  # } else { Glasgow3.list.HTO.list.names = append(Glasgow3.list.HTO.list.names, paste(name, names(Seurat.object.list), sep="_")) 
+  # }
+}
+
+#names(Glasgow3.list.HTO.list) <- Glasgow3.list.HTO.list.names
+print("You need a metadata file with:")
+names(Glasgow3.list.HTO.list)
+```
+
+# Visual QC
+
+```{r}
+Glasgow3.list.HTO.list
+```
+
+## A2_HTO1 as only 27 cells
+
+```{r}
+Glasgow3.list.HTO.list["A2_HTO1"] <- NULL
+```
+
+
+## A3 is not clear
+
+```{r}
+table(Glasgow3.list.HTO.list[["A3_1"]]$HTO)
+table(Glasgow3.list.HTO.list[["A3_0"]]$HTO)
+```
+
+```{r}
+A3 = Glasgow3.list[["A3"]]
+```
+
+```{r}
+table(A3$HTO_status)
+table(A3$SNP_status)
+table(A3$HTO_status, A3$SNP_status)
+table(A3$HTO, A3$SNP_cluster)
+```
+
+For A3 there are no cells for HTO1...
+
+```{r}
+DefaultAssay(A3) <- "RNA"
+A3 <- NormalizeData(A3)
+A3 <- FindVariableFeatures(A3, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+all.genes <- rownames(A3)
+A3 <- ScaleData(A3, features = all.genes)
+
+A3 <- RunPCA(object = A3, npcs = 40)
+ElbowPlot(object = A3, ndims  = 40)
+DimPlot(A3, reduction = "pca")
+```
+
+```{r}
+A3 <- RunUMAP(A3, dims = 1:30)
+A3 <- FindNeighbors(A3, dims = 1:30) %>% FindClusters(resolution = 0.2)
+```
+
+```{r}
+DimPlot(A3, label = TRUE)
+DimPlot(A3, group.by = "HTO_status")
+DimPlot(A3, group.by = "HTO")
+DimPlot(A3, group.by = "SNP_status")
+DimPlot(A3, group.by = "SNP_cluster")
+
+```
+
+```{r, fig.width=10}
+FeaturePlot(A3, c("CD1C","CLEC10A","CD14","S100A9","IGKC", "ITGAX", "BIRC5", "CD3D", "MARCO","SPP1","S100A12","TREM2"))
+```
+
+From visual inspection seems only 1 patient: HTO4
+
+```{r}
+
+Glasgow3.list.HTO.list["A3_1"] <- NULL
+Glasgow3.list.HTO.list["A3_0"] <- NULL
+table(Glasgow3.list[["A3"]]$HTO)
+Glasgow3.list[["A3"]]$HTO <- "HTO4"
+table(Glasgow3.list[["A3"]]$HTO_status)
+Glasgow3.list[["A3"]]$HTO_status <- "Singlet"
+Glasgow3.list[["A3"]]$SNP_cluster <- NULL
+Glasgow3.list[["A3"]]$SNP_status <- NULL
+
+Glasgow3.list.HTO.list[["A3"]] <- Glasgow3.list[["A3"]]
+```
+
+```{r}
+print("You need a metadata file with:")
+names(Glasgow3.list.HTO.list)
+```
+
+## All of them
+
+```{r, fig.width=10}
+for (name in names(Glasgow3.list.HTO.list)){
+  print(name)
+  Seurat.object = Glasgow3.list.HTO.list[[name]]
+  print(Seurat.object)
+  DefaultAssay(Seurat.object) <- "RNA"
+  Seurat.object <- NormalizeData(Seurat.object)
+  Seurat.object <- FindVariableFeatures(Seurat.object, selection.method = "vst", nfeatures = 2000)
+  
+  # Identify the 10 most highly variable genes
+  Seurat.object <- ScaleData(Seurat.object)
+  
+  Seurat.object <- RunPCA(object = Seurat.object, npcs = 30)
+  #ElbowPlot(object = Seurat.object, ndims  = 30)
+  #DimPlot(Seurat.object, reduction = "pca")
+  
+  Seurat.object <- RunUMAP(Seurat.object, dims = 1:30)
+  Seurat.object <- FindNeighbors(Seurat.object, dims = 1:30) %>% FindClusters(resolution = 0.1)
+  
+  plot=DimPlot(Seurat.object, label = TRUE)
+  plot = plot + plot_annotation(title = name, theme = theme(plot.title = element_text(hjust = 0.5)))
+  print(plot)
+  
+  print(FeaturePlot(Seurat.object, c("CD1C","CLEC10A","CD14","S100A9","IGKC", "ITGAX", "CD3D", "MARCO","SPP1"), ncol = 3))
+}
+```
+
+## Metadata
+
+```{r}
+metadata = read.csv("metadata_Jun23_toA10.csv")
+rownames(metadata) <- metadata$Unique_ID
+metadata
+```
+
+```{r}
+for (name in names(Glasgow3.list.HTO.list)) {
+  print(name)
+  #print(WST.project.HTO.list[[name]])
+  #print(metadata[name,])
+  Glasgow3.list.HTO.list[[name]]=make.add.meta(Glasgow3.list.HTO.list[[name]], metadata[name,])
+}
+
+Glasgow3.list.HTO.list
+names(Glasgow3.list.HTO.list)
+```
+
+# Integration
+
+```{r}
+Glasgow3.noint <- merge(Glasgow3.list.HTO.list[[1]], y = Glasgow3.list.HTO.list[2:length(Glasgow3.list.HTO.list)], project = "CD45+ ST CITEseq")
+Glasgow3.noint
+```
+
+```{r}
+DefaultAssay(Glasgow3.noint) <- "RNA"
+Glasgow3.noint <- NormalizeData(Glasgow3.noint)
+Glasgow3.noint <- FindVariableFeatures(Glasgow3.noint, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+Glasgow3.noint <- ScaleData(Glasgow3.noint)
+
+Glasgow3.noint <- RunPCA(object = Glasgow3.noint, npcs = 40)
+ElbowPlot(object = Glasgow3.noint, ndims  = 40)
+DimPlot(Glasgow3.noint, reduction = "pca")
+```
+
+```{r}
+gc()
+table(Glasgow3.noint$SampleID)
+table(Glasgow3.noint$Unique_ID)
+```
+
+```{r}
+Glasgow3.noint <- RunHarmony(Glasgow3.noint, group.by.vars = "Unique_ID")
+```
+
+```{r}
+Glasgow3.noint <- RunUMAP(Glasgow3.noint, reduction = "harmony", dims = 1:30)
+Glasgow3.noint <- FindNeighbors(Glasgow3.noint, reduction = "harmony", dims = 1:30) %>% FindClusters(resolution = 0.1)
+```
+
+```{r, fig.width=10}
+DimPlot(Glasgow3.noint, label = TRUE)
+DimPlot(Glasgow3.noint, group.by = "HTO_status")
+DimPlot(Glasgow3.noint, split.by = "Condition", ncol = 3)
+ProportionPlot(Glasgow3.noint, "seurat_clusters", "Condition")
+table(Glasgow3.noint$Condition, Glasgow3.noint$seurat_clusters)
+```
+
+```{r, fig.height=10}
+FeaturePlot(Glasgow3.noint, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9","rna_IGKC", "rna_ITGAX", "rna_BIRC5", "rna_CD3D", "rna_MARCO","rna_SPP1","rna_S100A12","rna_TREM2","rna_TNF","rna_CD79A","rna_LYVE1","rna_TREM2"), order = TRUE)
+DefaultAssay(Glasgow3.noint) <- "ADT"
+rownames(Glasgow3.noint)
+FeaturePlot(Glasgow3.noint, c("Hu.CD11c","Hu.CD11b","Hu.CD11a","Hu.CD14-M5E2","Hu.CD36","Hu.HLA.DR.DP.DQ","Hu.FceRIa","Hu.CD88","Hu.Podoplanin","Hu.CD9","Hu.CD5","Hu.CD88", "Hu.CD1c"))
+```
+
+```{r}
+Glasgow3.noint@misc$Markers = FindAllMarkers(Glasgow3.noint, min.pct = 0.4, logfc.threshold = 0.75, test.use = "MAST", assay = "RNA")
+```
+
+```{r}
+Glasgow3.noint$celltype <- plyr::revalue(as.character(Glasgow3.noint$seurat_clusters),
+                                        c("3"='Plasmacells',
+                                          "0"='Macrophage',
+                                          "1"="T cells",
+                                          "2"='DCs',
+                                          "5"='FLS',
+                                          "6"="? TNF+",
+                                          "4"="B cells",
+                                          "7"="7",
+                                          "8"="Cycling Cells",
+                                          "9"="9",
+                                          "10"="Endot"))
+Idents(Glasgow3.noint) <- "celltype"
+```
+
+```{r}
+DimPlot(Glasgow3.noint, label = TRUE)
+DimPlot(Glasgow3.noint, group.by = "HTO_status")
+DimPlot(Glasgow3.noint, split.by = "Condition", ncol = 3)
+ProportionPlot(Glasgow3.noint, "seurat_clusters", "Condition")
+table(Glasgow3.noint$Condition, Glasgow3.noint$seurat_clusters)
+```
+
+# ADT integration object`
+
+```{r}
+DefaultAssay(Glasgow3.noint) <- "ADT"
+ADT.list = SplitObject(Glasgow3.noint, split.by = "Unique_ID")
+ADT.list["A10-RNA"] <- NULL
+```
+
+```{r}
+features <- SelectIntegrationFeatures(object.list = ADT.list)
+
+for (i in 1:length(ADT.list)) {
+  # select features that are repeatedly variable across datasets for integration run PCA on each
+  # dataset using these features
+  ADT.list[[i]] <- DietSeurat(ADT.list[[i]], assays = "ADT")
+  ADT.list[[i]] <- ScaleData(ADT.list[[i]], features = features, verbose = FALSE)
+  ADT.list[[i]] <- RunPCA(ADT.list[[i]], features = features, verbose = FALSE)
+}
+```
+
+```{r}
+immune.anchors <- FindIntegrationAnchors(object.list = ADT.list, anchor.features = features, reduction = "rpca", scale = FALSE)
+
+# this command creates an 'integrated' data assay
+ADT.Object <- IntegrateData(anchorset = immune.anchors, new.assay.name = "Integrated.ADT")
+
+#Now we can run a single integrated analysis on all cells!
+
+# specify that we will perform downstream analysis on the corrected data note that the
+# original unmodified data still resides in the 'RNA' assay
+DefaultAssay(ADT.Object) <- "Integrated.ADT"
+
+# Run the standard workflow for visualization and clustering
+ADT.Object <- ScaleData(ADT.Object, verbose = FALSE, do.scale = FALSE,  do.center = TRUE)
+ADT.Object <- RunPCA(ADT.Object, npcs = 30, verbose = FALSE)
+ElbowPlot(object = ADT.Object, ndims  = 30)
+```
+
+```{r}
+ADT.Object <- RunUMAP(ADT.Object, reduction = "pca", dims = 1:15)
+ADT.Object <- FindNeighbors(ADT.Object, reduction = "pca", dims = 1:15)
+ADT.Object <- FindClusters(ADT.Object, resolution = 0.5)
+```
+
+```{r, fig.width=10}
+DimPlot(ADT.Object, label = TRUE)
+DimPlot(ADT.Object, split.by = "Condition", ncol = 3)
+#DimPlot(ADT.Object, group.by = "celltype", label = TRUE, repel = TRUE)
+#DimPlot(ADT.Object, group.by = "celltype", split.by = "celltype", ncol = 3)
+ProportionPlot(ADT.Object, "seurat_clusters", "Condition")
+#ProportionPlot(ADT.Object, "seurat_clusters", "celltype")
+#ProportionPlot(ADT.Object, "celltype", "seurat_clusters")
+table(ADT.Object$Condition, ADT.Object$seurat_clusters)
+ADT.Object
+table(ADT.Object$Condition)
+```
+
+#Transfer ADT info to Original
+
+```{r}
+saveRDS(Glasgow3.noint, "/datastore/Dom/Saved/WholeST/Jun23_A1-A10+Nointron.rds")
+Glasgow3.noint.No9_10 = subset(Glasgow3.noint, cells = colnames(ADT.Object))
+Glasgow3.noint.No9_10[["Integrated.ADT"]] <- ADT.Object[["Integrated.ADT"]]
+Glasgow3.noint.No9_10[["pca.adt"]] <- ADT.Object[["pca"]]
+Glasgow3.noint.No9_10[["umap.adt"]] <- ADT.Object[["umap"]]
+Glasgow3.noint.No9_10
+```
+
+For each cell, we calculate its closest neighbors in the dataset based on a weighted combination of RNA and protein similarities. The cell-specific modality weights and multimodal neighbors are calculated in a single function, which takes ~2 minutes to run on this dataset. We specify the dimensionality of each modality (similar to specifying the number of PCs to include in scRNA-seq clustering), but you can vary these settings to see that small changes have minimal effect on the overall results.
+
+# WNN
+
+```{r}
+# Identify multimodal neighbors. These will be stored in the neighbors slot, 
+# and can be accessed using Glasgow3.noint.No9_10[['weighted.nn']]
+# The WNN graph can be accessed at Glasgow3.noint.No9_10[["wknn"]], 
+# and the SNN graph used for clustering at Glasgow3.noint.No9_10[["wsnn"]]
+# Cell-specific modality weights can be accessed at Glasgow3.noint.No9_10$RNA.weight
+Glasgow3.noint.No9_10 <- FindMultiModalNeighbors(
+  Glasgow3.noint.No9_10, reduction.list = list("harmony", "pca.adt"), 
+  dims.list = list(1:30, 1:25), modality.weight.name = "RNA.weight"
+)
+```
+
+We can now use these results for downstream analysis, such as visualization and clustering. For example, we can create a UMAP visualization of the data based on a weighted combination of RNA and protein data We can also perform graph-based clustering and visualize these results on the UMAP, alongside a set of cell annotations.
+
+```{r}
+Glasgow3.noint.No9_10 <- RunUMAP(Glasgow3.noint.No9_10, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+Glasgow3.noint.No9_10 <- FindClusters(Glasgow3.noint.No9_10, graph.name = "wsnn", algorithm = 3, resolution = 2, verbose = FALSE)
+
+DimPlot(Glasgow3.noint.No9_10, reduction = 'wnn.umap', label = TRUE, repel = TRUE, label.size = 2.5) + NoLegend()
+DimPlot(Glasgow3.noint.No9_10, reduction = 'wnn.umap', label = TRUE, repel = TRUE, label.size = 2.5, group.by = "celltype") + NoLegend()
+```
+
+```{r, fig.height=10}
+FeaturePlot(Glasgow3.noint.No9_10, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9","rna_IGKC", "rna_ITGAX", "rna_BIRC5", "rna_CD3D", "rna_MARCO","rna_SPP1","rna_TNF","rna_S100A12"), order=TRUE)
+FeaturePlot(Glasgow3.noint.No9_10, c("Hu.CD11c","Hu.CD11b","Hu.CD11a","Hu.CD14-M5E2","Hu.CD36","Hu.HLA.DR.DP.DQ","Hu.FceRIa","Hu.CD88","Hu.Podoplanin","Hu.CD9","Hu.CD5","Hu.CD88", "Hu.CD1c"), order = TRUE)
+```
+
+```{r}
+saveRDS(Glasgow3.noint.No9_10, "/datastore/Dom/Saved/WholeST/Jun23_A1-A8+Nointron+ADT.rds")
+```
+
+#Myeloid
+
+```{r}
+Idents(Glasgow3.noint.No9_10) <- "celltype"
+table(Glasgow3.noint.No9_10$celltype)
+Myeloid.noint = subset(Glasgow3.noint.No9_10, idents = c("DCs","Macrophage"))
+```
+
+```{r, fig.width=8}
+Idents(Myeloid.noint) <- "seurat_clusters"
+DimPlot(Myeloid.noint, label=TRUE)
+```
+
+```{r}
+Idents(Myeloid.noint) <- "seurat_clusters"
+Myeloid.noint = subset(Myeloid.noint, idents = c("1","9","15","19","10","18","20","12","29","24","30","31"), invert=TRUE)
+```
+
+
+```{r, fig.width=8}
+FeaturePlot(Myeloid.noint, c("percent.ribo", "percent.hb", "percent.mt"))
+VlnPlot.median(Myeloid.noint, c("percent.ribo", "percent.hb", "percent.mt"), legend = FALSE)
+```
+
+
+```{r,fig.width=15}
+VlnPlot.median(Myeloid.noint, c("S100A12","CD1C","CLEC10A","CXCR4","SPP1","TREM2","LYVE1","ISG15","ICAM1", "MERTK","FOLR2","KLF2","VSIG4"), ncol = 4, legend = FALSE)
+FeaturePlot(Myeloid.noint, c("S100A12","CD1C","CLEC10A","CXCR4","SPP1","TREM2","LYVE1","ISG15","ICAM1", "MERTK","FOLR2","KLF2","VSIG4"), ncol = 4)
+```
+
+## Reclustering 
+
+```{r}
+DefaultAssay(Myeloid.noint) <- "RNA"
+Myeloid.noint.again <- FindVariableFeatures(Myeloid.noint, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+#all.genes <- rownames(Myeloid.noint.again)
+Myeloid.noint.again <- ScaleData(Myeloid.noint.again)
+
+Myeloid.noint.again <- RunPCA(object = Myeloid.noint.again, npcs = 40)
+ElbowPlot(object = Myeloid.noint.again, ndims  = 40)
+DimPlot(Myeloid.noint.again, reduction = "pca")
+```
+
+```{r}
+Myeloid.noint.again <- RunHarmony(Myeloid.noint.again, group.by.vars = "Unique_ID")
+ElbowPlot(object = Myeloid.noint.again, reduction = "harmony", ndims = 40)
+DimPlot(Myeloid.noint.again, reduction = "harmony")
+```
+
+```{r}
+Myeloid.noint.again <- RunUMAP(Myeloid.noint.again, reduction = "harmony", dims = 1:20)
+Myeloid.noint.again <- FindNeighbors(Myeloid.noint.again, reduction = "harmony", dims = 1:20) %>% FindClusters(resolution = 0.2)
+Myeloid.noint.again
+```
+
+```{r}
+DimPlot(Myeloid.noint.again, label = TRUE)
+DimPlot(Myeloid.noint.again, group.by = "HTO_status")
+DimPlot(Myeloid.noint.again, split.by = "Condition", ncol = 3)
+ProportionPlot(Myeloid.noint.again, "seurat_clusters", "Condition")
+table(Myeloid.noint.again$Condition, Myeloid.noint.again$seurat_clusters)
+```
+
+```{r, fig.width=10}
+DefaultAssay(Myeloid.noint.again) <- "RNA"
+FeaturePlot(Myeloid.noint.again, c("CD1C","CLEC10A","S100A12","SPP1","TREM2","LYVE1","MERTK","ISG15","ICAM1","VSIG4","FOLR2"), ncol = 3, order = TRUE, reduction = "umap")
+FeaturePlot(Myeloid.noint.again, c("SPP1","S100A12","LYVE1"), split.by = "Condition", order = TRUE, reduction = "umap")
+```
+
+```{r}
+DimPlot(Myeloid.noint.again)
+DimPlot(Myeloid.noint.again, reduction = "umap")
+table(Myeloid.noint.again$seurat_clusters)
+```
+
+# ADT integration object
+
+```{r}
+DefaultAssay(Myeloid.noint.again) <- "ADT"
+ADT.list = SplitObject(Myeloid.noint.again, split.by = "Unique_ID")
+```
+
+```{r}
+features <- SelectIntegrationFeatures(object.list = ADT.list)
+
+for (i in 1:length(ADT.list)) {
+  # select features that are repeatedly variable across datasets for integration run PCA on each
+  # dataset using these features
+  ADT.list[[i]] <- DietSeurat(ADT.list[[i]], assays = "ADT")
+  ADT.list[[i]] <- ScaleData(ADT.list[[i]], features = features, verbose = FALSE)
+  ADT.list[[i]] <- RunPCA(ADT.list[[i]], features = features, verbose = FALSE)
+}
+```
+
+```{r}
+immune.anchors <- FindIntegrationAnchors(object.list = ADT.list, anchor.features = features, reduction = "rpca", scale = FALSE)
+
+# this command creates an 'integrated' data assay
+immune.combined <- IntegrateData(anchorset = immune.anchors, new.assay.name = "Integrated.ADT", k.weight = 50)
+
+#Now we can run a single integrated analysis on all cells!
+
+# specify that we will perform downstream analysis on the corrected data note that the
+# original unmodified data still resides in the 'RNA' assay
+DefaultAssay(immune.combined) <- "Integrated.ADT"
+
+# Run the standard workflow for visualization and clustering
+immune.combined <- ScaleData(immune.combined, verbose = FALSE, do.scale = FALSE,  do.center = TRUE)
+immune.combined <- RunPCA(immune.combined, npcs = 30, verbose = FALSE)
+ElbowPlot(object = immune.combined, ndims  = 30)
+```
+
+```{r}
+immune.combined <- RunUMAP(immune.combined, reduction = "pca", dims = 1:15)
+immune.combined <- FindNeighbors(immune.combined, reduction = "pca", dims = 1:15)
+immune.combined <- FindClusters(immune.combined, resolution = 0.5)
+```
+
+```{r, fig.width=10}
+DimPlot(immune.combined, label = TRUE)
+DimPlot(immune.combined, split.by = "Condition", ncol = 3)
+DimPlot(immune.combined, group.by = "celltype", label = TRUE, repel = TRUE)
+DimPlot(immune.combined, group.by = "celltype", split.by = "celltype", ncol = 3)
+ProportionPlot(immune.combined, "seurat_clusters", "Condition")
+ProportionPlot(immune.combined, "seurat_clusters", "celltype")
+ProportionPlot(immune.combined, "celltype", "seurat_clusters")
+table(immune.combined$Condition, immune.combined$seurat_clusters)
+immune.combined
+table(immune.combined$Condition)
+```
+
+#Transfer ADT info to Original
+
+```{r}
+Myeloid.noint.again[["Integrated.ADT"]] <- immune.combined[["Integrated.ADT"]]
+Myeloid.noint.again[["pca.adt"]] <- immune.combined[["pca"]]
+Myeloid.noint.again[["umap.adt"]] <- immune.combined[["umap"]]
+Myeloid.noint.again
+```
+
+For each cell, we calculate its closest neighbors in the dataset based on a weighted combination of RNA and protein similarities. The cell-specific modality weights and multimodal neighbors are calculated in a single function, which takes ~2 minutes to run on this dataset. We specify the dimensionality of each modality (similar to specifying the number of PCs to include in scRNA-seq clustering), but you can vary these settings to see that small changes have minimal effect on the overall results.
+
+# WNN
+
+```{r}
+# Identify multimodal neighbors. These will be stored in the neighbors slot, 
+# and can be accessed using bm[['weighted.nn']]
+# The WNN graph can be accessed at bm[["wknn"]], 
+# and the SNN graph used for clustering at bm[["wsnn"]]
+# Cell-specific modality weights can be accessed at bm$RNA.weight
+Myeloid.noint.again <- FindMultiModalNeighbors(
+  Myeloid.noint.again, reduction.list = list("harmony", "pca.adt"), 
+  dims.list = list(1:30, 1:15), modality.weight.name = "RNA.weight"
+)
+```
+
+We can now use these results for downstream analysis, such as visualization and clustering. For example, we can create a UMAP visualization of the data based on a weighted combination of RNA and protein data We can also perform graph-based clustering and visualize these results on the UMAP, alongside a set of cell annotations.
+
+```{r}
+Myeloid.noint.again <- RunUMAP(Myeloid.noint.again, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+Myeloid.noint.again <- FindClusters(Myeloid.noint.again, graph.name = "wsnn", algorithm = 3, resolution = 2, verbose = FALSE)
+
+DimPlot(Myeloid.noint.again, reduction = 'wnn.umap', label = TRUE, repel = TRUE, label.size = 2.5) + NoLegend()
+```
+
+```{r, fig.height=8}
+FeaturePlot(Myeloid.noint.again, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9", "rna_ITGAX", "rna_BIRC5", "rna_CD3D","rna_SPP1","rna_S100A12","rna_MERTK","rna_FOLR2","rna_LYVE1"), order = TRUE)
+DefaultAssay(Myeloid.noint.again) <- "ADT"
+FeaturePlot(Myeloid.noint.again, c("Hu.CD11c","Hu.CD11b","Hu.CD14-M5E2","Hu.CD36","Hu.HLA.DR.DP.DQ","Hu.Podoplanin","Hu.CD9","Hu.CD5","Hu.CD47","Hu.CD29", "Hu.CD1c"))
+```
+
+```{r, fig.height=8}
+DefaultAssay(Myeloid.noint.again) <- "RNA"
+VlnPlot(Myeloid.noint.again, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9", "rna_ITGAX", "rna_BIRC5", "rna_CD3D", "rna_MARCO","rna_SPP1","rna_S100A12","rna_MERTK","rna_FOLR2"))
+DefaultAssay(Myeloid.noint.again) <- "ADT"
+VlnPlot(Myeloid.noint.again, c("Hu.CD11c","Hu.CD11b","Hu.CD14-M5E2","Hu.CD36","Hu.HLA.DR.DP.DQ","Hu.Podoplanin","Hu.CD9","Hu.CD5","Hu.CD47","Hu.CD29", "Hu.CD1c"))
+VlnPlot.median(Myeloid.noint.again, c("Hu.CD11c","Hu.CD11b","Hu.CD14-M5E2","Hu.CD36","Hu.HLA.DR.DP.DQ","Hu.Podoplanin","Hu.CD9","Hu.CD5","Hu.CD47","Hu.CD29", "Hu.CD1c"), legend = FALSE)
+```
+
+```{r}
+Myeloid.noint.again$celltype <- plyr::revalue(as.character(Myeloid.noint.again$seurat_clusters),
+                                        c("13"="DCs","4"="DCs","11"="S100A12+","8"="SPP1"))
+Idents(Myeloid.noint.again) <- "celltype"
+DimPlot(Myeloid.noint.again, label = TRUE) + NoLegend()
+```
+
+
+
+#DCs
+
+```{r}
+Idents(Myeloid.noint.again) <- "celltype"
+DCs = subset(Myeloid.noint.again, idents = c("DCs","S100A12+","6","14"))
+```
+
+
+```{r, fig.width=8}
+FeaturePlot(DCs, c("percent.ribo", "percent.hb", "percent.mt"))
+VlnPlot.median(DCs, c("percent.ribo", "percent.hb", "percent.mt"), legend = FALSE)
+```
+
+
+## Reclustering 
+
+```{r}
+DefaultAssay(DCs) <- "RNA"
+DCs <- FindVariableFeatures(DCs, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+#all.genes <- rownames(DCs)
+DCs <- ScaleData(DCs)
+
+DCs <- RunPCA(object = DCs, npcs = 40)
+ElbowPlot(object = DCs, ndims  = 40)
+DimPlot(DCs, reduction = "pca")
+```
+
+```{r}
+DCs <- RunHarmony(DCs, group.by.vars = "Unique_ID")
+ElbowPlot(object = DCs, reduction = "harmony", ndims = 40)
+DimPlot(DCs, reduction = "harmony")
+```
+
+```{r}
+DCs <- RunUMAP(DCs, reduction = "harmony", dims = 1:20)
+DCs <- FindNeighbors(DCs, reduction = "harmony", dims = 1:20) %>% FindClusters(resolution = 0.2)
+DCs
+```
+
+```{r}
+DimPlot(DCs, label = TRUE)
+DimPlot(DCs, label = TRUE, group.by = "celltype")
+DimPlot(DCs, group.by = "HTO_status")
+DimPlot(DCs, split.by = "Condition", ncol = 3)
+ProportionPlot(DCs, "seurat_clusters", "Condition")
+table(DCs$Condition, DCs$seurat_clusters)
+```
+
+```{r}
+FeaturePlot(DCs, c("CD1C","CLEC10A","S100A12","SPP1","TREM2","LYVE1"), ncol = 3, order = TRUE, reduction = "umap")
+FeaturePlot(DCs, c("SPP1","S100A12","LYVE1"), split.by = "Condition", order = TRUE, reduction = "umap")
+```
+
+```{r}
+DimPlot(DCs)
+DimPlot(DCs, reduction = "umap")
+table(DCs$seurat_clusters)
+```
+
+# ADT integration object
+
+```{r}
+DefaultAssay(DCs) <- "ADT"
+ADT.list = SplitObject(DCs, split.by = "Unique_ID")
+
+ADT.list
+```
+
+```{r}
+ADT.list["A7_HTO4"] <- NULL
+features <- SelectIntegrationFeatures(object.list = ADT.list)
+
+for (i in 1:length(ADT.list)) {
+  # select features that are repeatedly variable across datasets for integration run PCA on each
+  # dataset using these features
+  ADT.list[[i]] <- DietSeurat(ADT.list[[i]], assays = "ADT")
+  ADT.list[[i]] <- ScaleData(ADT.list[[i]], features = features, verbose = FALSE)
+  ADT.list[[i]] <- RunPCA(ADT.list[[i]], features = features, verbose = FALSE)
+}
+```
+
+```{r}
+immune.anchors <- FindIntegrationAnchors(object.list = ADT.list, anchor.features = features, reduction = "rpca", scale = FALSE)
+
+# this command creates an 'integrated' data assay
+immune.combined <- IntegrateData(anchorset = immune.anchors, new.assay.name = "Integrated.ADT", k.weight = 50)
+
+#Now we can run a single integrated analysis on all cells!
+
+# specify that we will perform downstream analysis on the corrected data note that the
+# original unmodified data still resides in the 'RNA' assay
+DefaultAssay(immune.combined) <- "Integrated.ADT"
+
+# Run the standard workflow for visualization and clustering
+immune.combined <- ScaleData(immune.combined, verbose = FALSE, do.scale = FALSE,  do.center = TRUE)
+immune.combined <- RunPCA(immune.combined, npcs = 30, verbose = FALSE)
+ElbowPlot(object = immune.combined, ndims  = 30)
+```
+
+```{r}
+immune.combined <- RunUMAP(immune.combined, reduction = "pca", dims = 1:15)
+immune.combined <- FindNeighbors(immune.combined, reduction = "pca", dims = 1:15)
+immune.combined <- FindClusters(immune.combined, resolution = 0.5)
+```
+
+```{r, fig.width=5}
+DimPlot(immune.combined, label = TRUE)
+DimPlot(immune.combined, split.by = "Condition", ncol = 3)
+DimPlot(immune.combined, group.by = "celltype", label = TRUE, repel = TRUE)
+DimPlot(immune.combined, group.by = "celltype", split.by = "celltype", ncol = 3)
+ProportionPlot(immune.combined, "seurat_clusters", "Condition")
+ProportionPlot(immune.combined, "seurat_clusters", "celltype")
+ProportionPlot(immune.combined, "celltype", "seurat_clusters")
+table(immune.combined$Condition, immune.combined$seurat_clusters)
+immune.combined
+table(immune.combined$Condition)
+```
+
+#Transfer ADT info to Original
+
+```{r}
+DCs.NoA7 = subset(DCs, cells = colnames(immune.combined))
+DCs.NoA7[["Integrated.ADT"]] <- immune.combined[["Integrated.ADT"]]
+DCs.NoA7[["pca.adt"]] <- immune.combined[["pca"]]
+DCs.NoA7[["umap.adt"]] <- immune.combined[["umap"]]
+DCs.NoA7
+```
+
+For each cell, we calculate its closest neighbors in the dataset based on a weighted combination of RNA and protein similarities. The cell-specific modality weights and multimodal neighbors are calculated in a single function, which takes ~2 minutes to run on this dataset. We specify the dimensionality of each modality (similar to specifying the number of PCs to include in scRNA-seq clustering), but you can vary these settings to see that small changes have minimal effect on the overall results.
+
+# WNN
+
+```{r}
+# Identify multimodal neighbors. These will be stored in the neighbors slot, 
+# and can be accessed using bm[['weighted.nn']]
+# The WNN graph can be accessed at bm[["wknn"]], 
+# and the SNN graph used for clustering at bm[["wsnn"]]
+# Cell-specific modality weights can be accessed at bm$RNA.weight
+DCs.NoA7 <- FindMultiModalNeighbors(
+  DCs.NoA7, reduction.list = list("harmony", "pca.adt"), 
+  dims.list = list(1:30, 1:15), modality.weight.name = "RNA.weight"
+)
+```
+
+We can now use these results for downstream analysis, such as visualization and clustering. For example, we can create a UMAP visualization of the data based on a weighted combination of RNA and protein data We can also perform graph-based clustering and visualize these results on the UMAP, alongside a set of cell annotations.
+
+```{r}
+DCs.NoA7 <- RunUMAP(DCs.NoA7, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+DCs.NoA7 <- FindClusters(DCs.NoA7, graph.name = "wsnn", algorithm = 3, resolution = 0.7, verbose = FALSE)
+
+DimPlot(DCs.NoA7, reduction = 'wnn.umap', label = TRUE, repel = TRUE, label.size = 2.5) + NoLegend()
+DimPlot(DCs.NoA7, reduction = 'wnn.umap', label = TRUE, repel = TRUE, label.size = 2.5, group.by = "celltype") + NoLegend()
+```
+
+```{r, fig.height=8}
+FeaturePlot(DCs.NoA7, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9", "rna_ITGAX","rna_S100A12","rna_CD163","rna_CD63"), order = TRUE)
+FeaturePlot(DCs.NoA7, c("Hu.CD1c","Hu.CD11c","Hu.CD36"), order = TRUE)
+
+VlnPlot.median(DCs.NoA7, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9", "rna_ITGAX","rna_S100A12","rna_CD163","rna_CD63","rna_CD36"))
+VlnPlot.median(DCs.NoA7, c("Hu.CD1c","Hu.CD11c","Hu.CD36"))
+Idents(DCs.NoA7) <- "celltype"
+VlnPlot.median(DCs.NoA7, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9", "rna_ITGAX","rna_S100A12","rna_CD163","rna_CD63","rna_CD36"))
+VlnPlot.median(DCs.NoA7, c("Hu.CD1c","Hu.CD11c","Hu.CD36"))
+Idents(DCs.NoA7) <- "seurat_clusters"
+```
+
+```{r, fig.width=10}
+plot_density(DCs.NoA7, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9", "rna_ITGAX","rna_S100A12","rna_CD163","rna_CD63","rna_CD36"))
+```
+
+```{r}
+DCs.NoA7@misc$markers = FindAllMarkers(DCs.NoA7, assay = "RNA", logfc.threshold = 0.4)
+DCs.NoA7@misc$adt.markers = FindAllMarkers(DCs.NoA7, assay = "ADT", logfc.threshold = 0.3)
+```
+
+```{r, fig.width=10}
+plot_density(DCs.NoA7, unique(DCs.NoA7@misc$adt.markers$gene))
+```
+
+```{r, fig.height=7}
+VlnPlot(DCs.NoA7, c("Hu.CD1c","Hu.CD9","Hu.CD11c", "Hu.CD36", "Hu.CD63"))
+VlnPlot.median(DCs.NoA7, c("Hu.CD1c","Hu.CD9","Hu.CD11c", "Hu.CD36", "Hu.CD63"))
+```
+
+
+```{r}
+DCs.NoA7$celltype_old <- DCs.NoA7$celltype
+DCs.NoA7$celltype <- plyr::revalue(as.character(DCs.NoA7$seurat_clusters),
+                                        c("0"='DC3B',
+                                          "4"="DC3B",
+                                          "2"='DC2',
+                                          "3"='DC2',
+                                          "1"="M S100A12+",
+                                          "6"="DC3 CD1c+",
+                                          "7"="DC1",
+                                          "5"="DC3 CD1c+"))
+Idents(DCs.NoA7) <- "celltype"
+DimPlot(DCs.NoA7)
+```
+
+```{r}
+DCs.NoA7
+```
+
+
+
+```{r}
+DC3B = subset(DCs.NoA7, idents="DC3B")
+DC3.CD1c = subset(DCs.NoA7, idents="DC3 CD1c+")
+DC2 = subset(DCs.NoA7, idents="DC2")
+DC1 = subset(DCs.NoA7, idents="DC1")
+S100  = subset(DCs.NoA7, idents="M S100A12+")
+macro = subset(Myeloid.noint.again, cells = colnames(DCs.NoA7), invert=TRUE)
+SPP1  = subset(macro, idents="SPP1")
+macro = subset(macro, idents = c("DCs","S100A12+","SPP1"), invert=TRUE)
+DimPlot(macro,label = TRUE)
+```
+
+```{r}
+VlnPlot(macro, "SPP1")
+```
+
+```{r}
+adt.to.fcs <- function(Seurat.object, filename, ADT.assay.name = "ADT", slot.type = "data") {
+  library(flowCore)
+  adt_data <- as.matrix(GetAssayData(object = Seurat.object, assay = ADT.assay.name, slot = slot.type))
+  print("ok")
+  adt_data <- t(adt_data) 
+  
+  # Create a flowFrame object from the ADT data
+  flow_data <- flowFrame(exprs = adt_data)
+  
+  # Create an FCS file from the flowFrame object
+  write.FCS(flow_data, filename)
+  
+  # Read the FCS file
+  my_fcs_file <- read.FCS(filename)
+  
+  # Check the FCS format
+  format(my_fcs_file)
+  parameters(my_fcs_file)
+}
+```
+
+
+```{r}
+adt.to.fcs(DC3B, "new/DC3B.fcs")
+adt.to.fcs(DC3.CD1c, "new/DC3_CD1c.fcs")
+adt.to.fcs(DC2, "new/DC2.fcs")
+adt.to.fcs(DC1, "new/DC1.fcs")
+adt.to.fcs(SPP1, "new/SPP1.fcs")
+adt.to.fcs(S100, "new/S100A12.fcs")
+adt.to.fcs(macro, "new/macro.fcs")
+```
+
+```{r, fig.width=4}
+DimPlot(DCs.NoA7, label = TRUE) + NoLegend()
+VlnPlot(DCs.NoA7, c("Hu.CD9","rna_CLEC10A","Hu.CD36","Hu.CD63","Hu.CD163"))
+VlnPlot.median(DCs.NoA7, c("Hu.CD9","rna_CLEC10A","Hu.CD36","Hu.CD63","Hu.CD163"), legend = FALSE)
+FeaturePlot(DCs.NoA7, c("Hu.CD9","rna_CLEC10A","Hu.CD36","Hu.CD63","Hu.CD163"), order = TRUE)
+```
+
+```{r}
+Idents()
+DC3B.markers = FindMarkers(DCs.NoA7, ident.1 = "DC3 CD1c+", ident.2 = "DC2", assay = "ADT", test.use = "MAST")
+```
+
+
+
+
+# Immunity
+
+```{r}
+Immunity = readRDS("/datastore/MKS_Data/UNpublished/DCpaper_CD1c-pos_cells.rds")
+DimPlot(Immunity)
+```
+
+```{r, fig.width=8}
+plot_density(Immunity, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9", "rna_ITGAX","rna_S100A12","rna_CD163","rna_CD63","rna_CD36"),reduction = "umap")
+```
+
+# GSK
+
+```{r}
+GSK = readRDS("/datastore/MKS_Data/UNpublished/GSK_RA_MHCII_HarmonyIntegrated_Dom.rds")
+```
+
+```{r}
+DimPlot(GSK)
+```
+
+```{r}
+DimPlot(GSK, split.by = "Condition", ncol = 3)
+```
+
+
+```{r}
+GSK.DS.2 = subset(GSK, idents = c("DC3","DC2","Monocyte derived S100A12+"))
+```
+
+```{r}
+ProportionPlot(GSK.DS.2, "celltype", "Condition")
+```
+
+
+## Reclustering 
+
+```{r}
+DefaultAssay(GSK.DS) <- "RNA"
+GSK.DS.list = SplitObject(GSK.DS, split.by = "Patient")
+```
+
+```{r}
+GSK.DS.list.good = c()
+
+for (i in 1:length(GSK.DS.list)) {
+  #print(i)
+  if (ncol(GSK.DS.list[[i]]) > 50) {
+    GSK.DS.list.good = append(GSK.DS.list.good, GSK.DS.list[[i]])
+  }
+}
+
+GSK.DS.list.good
+```
+
+
+```{r}
+GSK.DS = merge(GSK.DS.list.good[[1]], y=GSK.DS.list.good[2:length(GSK.DS.list.good)])
+
+DefaultAssay(GSK.DS) <- "RNA"
+GSK.DS <- FindVariableFeatures(GSK.DS, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+#all.genes <- rownames(GSK.DS)
+GSK.DS <- ScaleData(GSK.DS)
+
+GSK.DS <- RunPCA(object = GSK.DS, npcs = 30)
+ElbowPlot(object = GSK.DS, ndims  = 30)
+DimPlot(GSK.DS, reduction = "pca")
+```
+
+
+
+```{r}
+GSK.DS <- RunHarmony(GSK.DS, group.by.vars = "Patient")
+ElbowPlot(object = GSK.DS, reduction = "harmony", ndims = 30)
+DimPlot(GSK.DS, reduction = "harmony")
+```
+
+```{r}
+GSK.DS <- RunUMAP(GSK.DS, reduction = "harmony", dims = 1:15)
+GSK.DS <- FindNeighbors(GSK.DS, reduction = "harmony", dims = 1:15) %>% FindClusters(resolution = 0.7)
+GSK.DS
+```
+
+```{r}
+DimPlot(GSK.DS, label = TRUE, group.by = "seurat_clusters")
+DimPlot(GSK.DS, group.by = "HTO_status")
+DimPlot(GSK.DS, split.by = "Condition", ncol = 3)
+ProportionPlot(GSK.DS, "seurat_clusters", "Condition")
+table(GSK.DS$Condition, GSK.DS$seurat_clusters)
+```
+
+```{r, fig.width=8}
+FeaturePlot(GSK.DS, c("CD1C","CLEC10A","S100A12","CD63","CD163","CD36"), ncol = 3, order = TRUE, reduction = "umap")
+FeaturePlot(GSK.DS, c("CD1C","CLEC10A","S100A12"), split.by = "Condition", order = TRUE, reduction = "umap")
+```
+
+```{r}
+DimPlot(GSK.DS, group.by = "seurat_clusters",split.by = "Condition")
+DimPlot(GSK.DS, reduction = "umap")
+table(GSK.DS$seurat_clusters)
+```
+
+```{r}
+GSK.DS$celltype <- plyr::revalue(as.character(GSK.DS$seurat_clusters),
+                                        c("0"='DC3',
+                                          "1"="DC2",
+                                          "5"='DC3',
+                                          "3"='DC3',
+                                          "6"="DC3",
+                                          "7"="M S100A12+",
+                                          "2"="M S100A12+",
+                                          "4"="M S100A12+",
+                                          "8"="DC1"))
+Idents(GSK.DS) <- "celltype"
+DimPlot(GSK.DS)
+ProportionPlot(GSK.DS, "celltype", "Condition")
+```
+
+
+# ADT integration object
+
+```{r}
+DefaultAssay(GSK.DS) <- "ADT"
+ADT.list = SplitObject(GSK.DS, split.by = "Patient")
+
+ADT.list
+```
+
+```{r}
+features <- SelectIntegrationFeatures(object.list = ADT.list)
+
+for (i in 1:length(ADT.list)) {
+  # select features that are repeatedly variable across datasets for integration run PCA on each
+  # dataset using these features
+  print(i)
+  ADT.list[[i]] <- DietSeurat(ADT.list[[i]], assays = "ADT")
+  ADT.list[[i]] <- ScaleData(ADT.list[[i]], features = features, verbose = FALSE)
+  ADT.list[[i]] <- RunPCA(ADT.list[[i]], features = features, verbose = FALSE)
+}
+```
+
+```{r}
+immune.anchors <- FindIntegrationAnchors(object.list = ADT.list, anchor.features = features, reduction = "rpca", scale = FALSE)
+
+# this command creates an 'integrated' data assay
+immune.combined <- IntegrateData(anchorset = immune.anchors, new.assay.name = "Integrated.ADT", k.weight = 50)
+
+#Now we can run a single integrated analysis on all cells!
+
+# specify that we will perform downstream analysis on the corrected data note that the
+# original unmodified data still resides in the 'RNA' assay
+DefaultAssay(immune.combined) <- "Integrated.ADT"
+
+# Run the standard workflow for visualization and clustering
+immune.combined <- ScaleData(immune.combined, verbose = FALSE, do.scale = FALSE,  do.center = TRUE)
+immune.combined <- RunPCA(immune.combined, npcs = 30, verbose = FALSE)
+ElbowPlot(object = immune.combined, ndims  = 30)
+```
+
+```{r}
+immune.combined <- RunUMAP(immune.combined, reduction = "pca", dims = 1:15)
+immune.combined <- FindNeighbors(immune.combined, reduction = "pca", dims = 1:15)
+immune.combined <- FindClusters(immune.combined, resolution = 0.5)
+```
+
+```{r, fig.width=5}
+DimPlot(immune.combined, label = TRUE)
+DimPlot(immune.combined, split.by = "Condition", ncol = 3)
+DimPlot(immune.combined, group.by = "celltype", label = TRUE, repel = TRUE)
+DimPlot(immune.combined, group.by = "celltype", split.by = "celltype", ncol = 3)
+ProportionPlot(immune.combined, "seurat_clusters", "Condition")
+ProportionPlot(immune.combined, "seurat_clusters", "celltype")
+ProportionPlot(immune.combined, "celltype", "seurat_clusters")
+table(immune.combined$Condition, immune.combined$seurat_clusters)
+immune.combined
+table(immune.combined$Condition)
+```
+
+#Transfer ADT info to Original
+
+```{r}
+DCs.NoA7 = subset(DCs, cells = colnames(immune.combined))
+DCs.NoA7[["Integrated.ADT"]] <- immune.combined[["Integrated.ADT"]]
+DCs.NoA7[["pca.adt"]] <- immune.combined[["pca"]]
+DCs.NoA7[["umap.adt"]] <- immune.combined[["umap"]]
+DCs.NoA7
+```
+
+For each cell, we calculate its closest neighbors in the dataset based on a weighted combination of RNA and protein similarities. The cell-specific modality weights and multimodal neighbors are calculated in a single function, which takes ~2 minutes to run on this dataset. We specify the dimensionality of each modality (similar to specifying the number of PCs to include in scRNA-seq clustering), but you can vary these settings to see that small changes have minimal effect on the overall results.
+
+# WNN
+
+```{r}
+# Identify multimodal neighbors. These will be stored in the neighbors slot, 
+# and can be accessed using bm[['weighted.nn']]
+# The WNN graph can be accessed at bm[["wknn"]], 
+# and the SNN graph used for clustering at bm[["wsnn"]]
+# Cell-specific modality weights can be accessed at bm$RNA.weight
+DCs.NoA7 <- FindMultiModalNeighbors(
+  DCs.NoA7, reduction.list = list("harmony", "pca.adt"), 
+  dims.list = list(1:30, 1:15), modality.weight.name = "RNA.weight"
+)
+```
+
+We can now use these results for downstream analysis, such as visualization and clustering. For example, we can create a UMAP visualization of the data based on a weighted combination of RNA and protein data We can also perform graph-based clustering and visualize these results on the UMAP, alongside a set of cell annotations.
+
+```{r}
+DCs.NoA7 <- RunUMAP(DCs.NoA7, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+DCs.NoA7 <- FindClusters(DCs.NoA7, graph.name = "wsnn", algorithm = 3, resolution = 0.7, verbose = FALSE)
+
+DimPlot(DCs.NoA7, reduction = 'wnn.umap', label = TRUE, repel = TRUE, label.size = 2.5) + NoLegend()
+```
+
+```{r, fig.height=8}
+FeaturePlot(DCs.NoA7, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9", "rna_ITGAX","rna_S100A12","rna_CD163","rna_CD63"), order = TRUE)
+FeaturePlot(DCs.NoA7, c("Hu.CD1c","Hu.CD11c","Hu.CD36"), order = TRUE)
+
+VlnPlot.median(DCs.NoA7, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9", "rna_ITGAX","rna_S100A12","rna_CD163","rna_CD63","rna_CD36"))
+VlnPlot.median(DCs.NoA7, c("Hu.CD1c","Hu.CD11c","Hu.CD36"))
+```
+
+```{r, fig.width=8}
+plot_density(DCs.NoA7, c("rna_CD1C","rna_CLEC10A","rna_CD14","rna_S100A9", "rna_ITGAX","rna_S100A12","rna_CD163","rna_CD63","rna_CD36"))
+```
+
+```{r}
+DCs.NoA7@misc$markers = FindAllMarkers(DCs.NoA7, assay = "RNA", logfc.threshold = 0.4)
+DCs.NoA7@misc$adt.markers = FindAllMarkers(DCs.NoA7, assay = "ADT", logfc.threshold = 0.3)
+```
+
+```{r, fig.width=8}
+plot_density(DCs.NoA7, unique(DCs.NoA7@misc$adt.markers$gene))
+```
+
+```{r, fig.width=9}
+FeaturePlot(Myeloid.noint.again, c("CLEC10A","SPP1"), reduction = "wnn.umap")
+VlnPlot(Myeloid.noint.again, c("CLEC10A","SPP1"))
+```
+
+
+```{r}
+DefaultAssay(Myeloid.noint.again) <- "ADT"
+p1 <- FeaturePlot(Myeloid.noint.again, "Hu.CD1c", cols = c("lightgrey", "darkgreen")) + ggtitle("CD1c protein")
+DefaultAssay(Myeloid.noint.again) <- "RNA"
+p2 <- FeaturePlot(Myeloid.noint.again, "rna_CD1C", reduction = "wnn.umap") + ggtitle("CD1c RNA")
+
+# place plots side-by-side
+p1 | p2
+```
+
+```{r}
+DefaultAssay(Myeloid.noint.again) <- "ADT"
+p1 <- FeaturePlot(Myeloid.noint.again, "Hu.CD11c", cols = c("lightgrey", "darkgreen")) + ggtitle("CD11c protein")
+DefaultAssay(Myeloid.noint.again) <- "RNA"
+p2 <- FeaturePlot(Myeloid.noint.again, "rna_ITGAX", reduction = "wnn.umap") + ggtitle("CD11c RNA")
+
+# place plots side-by-side
+p1 | p2
+```
+
+```{r, fig.width=7}
+DimPlot(Glasgow3.noint.No9_10, reduction = "umap", label = TRUE)
+```
+

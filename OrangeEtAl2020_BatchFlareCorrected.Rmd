@@ -1,0 +1,357 @@
+---
+title: "PRIME Cells Heatmap"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r}
+#Load Libraries Required for Data Processing and Visualisation
+library(pheatmap)
+library(ggplot2)
+library(ggrepel)
+library(scales)
+library(RColorBrewer)
+library(dplyr)
+library(plyr)
+library(ggmin)
+```
+
+```{r}
+#Load in Updated Metadata
+metadata<-read.csv('/Users/jackfrew/Documents/DANA Orange LogFC Data/Combat Normalised/Batch_Flare_metadata_combat.csv')
+```
+
+```{r}
+#Load in Normalised Counts
+normcounts<-read.csv('/Users/jackfrew/Documents/DANA Orange LogFC Data/Combat Normalised/Batch_Flare_combat.adjusted.csv')
+#Adjust Rownames to Correct Format
+rownames(normcounts)<-normcounts$X
+normcounts$X<-NULL
+```
+
+```{r}
+#Subset only Samples for which we have timepoint to flare info
+timepoints_to_keep <- c('0',  '1',  '2',  '3',  '4', '-8', '-7', '-6', '-4', '-3', '-2', '-1', '-5')
+final_metadata <- metadata[metadata$Weeks.to.Flare %in% timepoints_to_keep, ]
+```
+
+```{r}
+#Create Notin Function
+`%notin%` <- Negate(`%in%`)
+```
+
+```{r}
+#Remove Samples with conflicting metadata to which we have received
+samples_to_remove <- c("FS.184", "FS.3053", "FS.3054", "FS.3055", 'FS.795')
+final_metadata <- final_metadata[final_metadata$Sample.Name %notin% samples_to_remove, ]
+final_metadata$Sample.Name <- gsub("-", ".", final_metadata$Sample.Name)
+samples_to_keep <- final_metadata$Sample.Name
+#Select only Sampels of Interest in the final Counts 
+finalcounts <- normcounts[, samples_to_keep]
+#Match order of metadata
+sample_order<-final_metadata$Sample.Name
+```
+
+```{r}
+#Get DC Signature Genes
+#Read in Table with Module Score Genes
+DCmodscore<-read.csv('/Users/jackfrew/Documents/DANA Orange LogFC Data/DCgenes-modulescore-dana.csv')
+#Remove TSPAN As not in Updated Panel
+newDCmodscore<-DCmodscore[-25,]
+#Create Vector of DC Signature Genes
+geneoidcsig<-c(newDCmodscore$gene)
+
+#Create Counts with only Genes from DC Signature
+dccounts<-finalcounts[geneoidcsig,]
+```
+
+```{r}
+#Scale data
+scale_rows <- function(x) t(scale(t(x)))
+scaled_data <- scale_rows(dccounts) # Z-score
+scaled_data[scaled_data > 2] <- 2
+scaled_data[scaled_data < -2] <- -2
+
+#Ensure Scaled Data Matches Sample Order
+scaled_data<- scaled_data[, sample_order]
+```
+
+```{r}
+#Prepare PHeatmap Info
+final_metadata$Weeks.to.Flare <- as.ordered(factor(final_metadata$Weeks.to.Flare, levels=c('-8', '-7', '-6', '-5', '-4', '-3', '-2', '-1', '0', '1', '2', '3', '4')))
+
+meta_info <- data.frame(
+  Sample= colnames(scaled_data),
+  Time = final_metadata$Weeks.to.Flare,
+  Condition = final_metadata$Disease.Stage.Condition)
+
+
+rownames(meta_info)<-meta_info$Sample
+
+#Order cells by cluster
+scaled_data <- scaled_data[,order(meta_info$Time)]
+```
+
+```{r}
+#Prepare Colours for Heatmap
+
+condition.cols <- c('green', 'red')
+time.cols<- c(
+  "dodgerblue2", "#E31A1C", # red
+  "green4",
+  "#6A3D9A", # purple
+  "#FF7F00", # orange
+  "black", "gold1",
+  "skyblue2", "#FB9A99", # lt pink
+  "palegreen2",
+  "#CAB2D6", # lt purple
+  "#FDBF6F", # lt orange
+  "gray70")
+sample.cols<-hue_pal()(63)
+
+names(condition.cols) <- levels(meta_info$Condition)
+names(time.cols) <- levels(meta_info$Time)
+names(sample.cols) <- levels(meta_info$Sample)
+
+meta_info$Condition<-as.factor(ordered(meta_info$Condition, levels=c("Baseline", 'Flare')))
+
+names(condition.cols) <- levels(meta_info$Condition)
+
+metacols <- list(
+  Condition = condition.cols,
+  Time = time.cols)
+```
+
+
+
+```{r}
+pheatmap(
+  scaled_data,  # Use the scaled data with gene names as row names
+  color = colorRampPalette(rev(brewer.pal(11, "RdBu")))(256),  # Choose a color palette
+  cluster_rows = TRUE,  # Cluster rows
+  cluster_cols = FALSE,
+  border_color = NA,
+  annotation_colors = metacols,
+  annotation_col = meta_info)
+```
+
+
+```{r}
+pheatmap(
+  scaled_data,  # Use the scaled data with gene names as row names
+  color = colorRampPalette(c("#EB5AF7","#0B0801","#FFF957"))(50),  # Choose a color palette
+  cluster_rows = TRUE,  # Cluster rows
+  cluster_cols = FALSE,
+  border_color = NA,
+  annotation_colors = metacols,
+  annotation_col = meta_info)
+```
+
+```{r}
+heatmap <-pheatmap(
+  scaled_data,  # Use the scaled data with gene names as row names
+  color = colorRampPalette(rev(brewer.pal(11, "RdBu")))(256),  # Choose a color palette
+  cluster_rows = TRUE,  # Cluster rows
+  cluster_cols = TRUE,
+  border_color = NA,
+  annotation_colors = metacols,
+  annotation_col = meta_info,
+  fontsize_col=5)
+```
+
+
+```{r}
+heatmap <-pheatmap(
+  scaled_data,  # Use the scaled data with gene names as row names
+  color = colorRampPalette(c("#EB5AF7","#0B0801","#FFF957"))(50),  # Choose a color palette
+  cluster_rows = TRUE,  # Cluster rows
+  cluster_cols = TRUE,
+  border_color = NA,
+  annotation_colors = metacols,
+  annotation_col = meta_info,
+  fontsize_col=5)
+```
+
+Now Plot as Average Expression Per Timepoint
+
+```{r}
+###Average Expression of Counts Matrix by Timepoint
+average_metadata<-final_metadata[,c('Sample.Name', 'Weeks.to.Flare')]
+#Match order of metadata
+sample_order<-average_metadata$Sample.Name
+#Match Colnames to Sample Order
+#Ensure Scaled Data Matches Sample Order
+normcounts_foraverage<- normcounts[, sample_order]
+colnames(normcounts_foraverage)<-average_metadata$Weeks.to.Flare
+#average counts 
+library(limma)
+averaged_matrix <- avearrays(normcounts_foraverage)
+averaged_matrix<-as.data.frame(averaged_matrix)
+#Select only genes Associated with DC Signature
+averaged_dccounts<-averaged_matrix[geneoidcsig,]
+```
+
+```{r}
+#Scale data
+scale_rows <- function(x) t(scale(t(x)))
+average_scaled_data <- scale_rows(averaged_dccounts) # Z-score
+
+average_scaled_data[average_scaled_data > 2] <- 2
+average_scaled_data[average_scaled_data < -2] <- -2
+
+average_scaled_data<-average_scaled_data[,c('-8', '-7', '-6', '-5', '-4', '-3', '-2', '-1', '0', '1', '2', '3', '4')]
+```
+
+```{r}
+#Prepare PHeatmap Info
+
+colnames(average_scaled_data)<-as.factor(ordered(colnames(average_scaled_data), levels=c('-8', '-7', '-6', '-5', '-4', '-3', '-2', '-1', '0', '1', '2', '3', '4')))
+
+f<-as.data.frame(colnames(average_scaled_data))
+f$Timepoint = f$`colnames(average_scaled_data)`
+f$`colnames(average_scaled_data)`=NULL
+
+f$Timepoint<-as.factor(ordered(f$Timepoint, levels=c('-8', '-7', '-6', '-5', '-4', '-3', '-2', '-1', '0', '1', '2', '3', '4')))
+
+f$condition <- plyr::revalue(as.character(f$Timepoint),
+                               c('-8'='Baseline',
+                                 '-7'='Baseline',
+                                 '-6'='Baseline',
+                                 '-5'='Baseline',
+                                 '-4'='Baseline',
+                                 '-3'='Baseline',
+                                 '-2'='Baseline',
+                                 '-1'='Baseline',
+                                 '0'='Flare',
+                                 '1'='Flare',
+                                 '2'='Flare',
+                                 '3'='Flare',
+                                 '4'='Flare'))
+
+f$condition<-as.factor(ordered(f$condition, levels=c('Baseline', 'Flare')))
+
+
+meta_info <- data.frame(
+  Timepoint = f$Time,
+  Condition= f$condition)
+
+rownames(meta_info)<-meta_info$Timepoint
+
+meta_info$Timepoint<-as.factor(ordered(meta_info$Timepoint, levels=c('-8', '-7', '-6', '-5', '-4', '-3', '-2', '-1', '0', '1', '2', '3', '4')))
+
+meta_info$Condition<-as.factor(ordered(meta_info$Condition, levels=c('Baseline', 'Flare')))
+```
+
+```{r}
+#Prepare Colours for Heatmap
+time.cols<- c(
+  "dodgerblue2", "#E31A1C", # red
+  "green4",
+  "#6A3D9A", # purple
+  "#FF7F00", # orange
+  "black", "gold1",
+  "skyblue2", "#FB9A99", # lt pink
+  "palegreen2",
+  "#CAB2D6", # lt purple
+  "#FDBF6F", # lt orange
+  "gray70")
+
+condition.cols <- c('green', 'red')
+
+names(condition.cols)  <- levels(meta_info$Condition)
+names(time.cols) <- levels(meta_info$Timepoint)
+
+metacols <- list(Condition = condition.cols,
+  Timepoint = time.cols)
+```
+
+
+```{r}
+pheatmap(
+  average_scaled_data,  # Use the scaled data with gene names as row names
+  color = colorRampPalette(rev(brewer.pal(11, "RdBu")))(256),  # Choose a color palette
+  cluster_rows = TRUE,  # Cluster rows
+  cluster_cols = FALSE,
+  border_color = NA,
+  annotation_colors = metacols,
+  annotation_col = meta_info)
+```
+
+
+```{r}
+pheatmap(
+  average_scaled_data,  # Use the scaled data with gene names as row names
+  color = colorRampPalette(c("#EB5AF7","#0B0801","#FFF957"))(50),  # Choose a color palette
+  cluster_rows = TRUE,  # Cluster rows
+  cluster_cols = FALSE,
+  border_color = NA,
+  annotation_colors = metacols,
+  annotation_col = meta_info)
+```
+
+Attempt GSVA Gene Scoring
+
+```{r}
+library(GSVA)
+
+###Average Expression of Counts Matrix by Timepoint
+average_metadata<-final_metadata[,c('Sample.Name', 'Weeks.to.Flare')]
+#Match order of metadata
+sample_order<-average_metadata$Sample.Name
+#Match names to Sample Order
+#Ensure Scaled Data Matches Sample Order
+normcounts_foraverage<- normcounts[, sample_order]
+
+colnames(normcounts_foraverage)<-average_metadata$Weeks.to.Flare
+
+```
+
+
+```{r}
+# Perform GSVA on your counts matrix
+
+#Select only genes Associated with DC Signature
+averaged_dccounts<-averaged_matrix[geneoidcsig,]
+
+A <- as(normcounts_foraverage, "sparseMatrix") 
+
+my_gene_sets <- list(gene_set_1 = geneoidcsig)
+
+gsva_result <- gsva(expr = A, gset.idx.list = my_gene_sets)
+
+averaged_gsva <- avearrays(gsva_result)
+#averaged_matrix<-as.data.frame(averaged_matrix)
+
+gsva_results_output<-as.data.frame(t(averaged_gsva))
+gsva_results_output$Timepoint<-rownames(gsva_results_output)
+
+gsva_results_output$Timepoint<-as.factor(ordered(gsva_results_output$Timepoint, levels=c('-8', '-7', '-6', '-5', '-4', '-3', '-2', '-1', '0', '1', '2', '3', '4')))
+
+ggplot(data=gsva_results_output, aes(x=Timepoint, y=gene_set_1, fill=Timepoint)) + geom_bar(stat='identity', orientation = 'x')  +
+  scale_fill_manual(values=time.cols) + theme_powerpoint() +
+    theme(axis.text.x = element_text(size=16), axis.text.y = element_text(size=16)) 
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

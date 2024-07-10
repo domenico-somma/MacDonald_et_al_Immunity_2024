@@ -1,0 +1,1102 @@
+---
+title: An R Markdown document converted from "C:/Documents and Settings/Domenico/Downloads/MNPverse_integration_subsample.ipynb"
+---
+
+```{r}
+#!/usr/bin/env Rscript 
+#.libPaths("/software/R-4.1.0/lib/R/library")
+library(Seurat)
+library(dplyr)
+library(httr)
+library(readr)
+library(pheatmap)
+library(RColorBrewer)
+library(ggplot2)
+library(cowplot)
+library(patchwork)
+library(unixtools)
+library(ggrepel)
+library(repr)
+#library(ggmin)
+library(harmony)
+library(SeuratWrappers)
+library(Nebulosa)
+library(ggthemes)
+set_config(config(ssl_verifypeer = 0L))
+ulimit::memory_limit(100000)
+set.tempdir("/datastore3/Dom/temporary/")
+#setwd("/datastore/lucy/SynovialAtlas/CD1c")
+options(warn = -1, verbose=FALSE)
+source("/datastore3/Dom/commonFunctions.R")
+```
+
+# Load data from MoMac
+
+```{r}
+MoMac <- readRDS("/datastore/lucy/SynovialAtlas/CD1c/2021_MoMac_VERSE.RDS")
+```
+
+```{r}
+MoMac
+```
+
+```{r}
+head(MoMac@meta.data)
+```
+
+```{r}
+Idents(MoMac) <- "Clusters"
+```
+
+```{r, fig.width=7, fig.height=5}
+DimPlot(MoMac, label=TRUE, raster=FALSE) 
+```
+
+```{r, fig.width=20, fig.height=20}
+DimPlot(MoMac, label=TRUE, raster=FALSE, split.by = "Clusters", ncol = 5) 
+```
+
+## Adjust MoMac metadata
+
+```{r}
+MoMac$Paper <- "MoMac_verse"
+```
+
+```{r}
+MoMac$Experiment <- paste0(MoMac$Paper,"_",MoMac$Study)
+```
+
+```{r}
+DimPlot(MoMac, group.by = "Patients") + NoLegend()
+DimPlot(MoMac, group.by = "Patient No") + NoLegend()
+```
+
+```{r, fig.height=20}
+DimPlot(MoMac, split.by = "Patients", ncol = 5) + NoLegend()
+DimPlot(MoMac, split.by = "Patient No", ncol = 5) + NoLegend()
+```
+
+```{r}
+MoMac$Unique_ID <- MoMac$`Patient No`
+```
+
+```{r}
+DefaultAssay(MoMac) <- "RNA"
+```
+
+```{r}
+table(Idents(MoMac))
+```
+
+```{r}
+MoMac.sub <- subset(MoMac, downsample=1000)
+```
+
+```{r, fig.width=7, fig.height=5}
+DimPlot(MoMac, label=TRUE, raster=FALSE)
+```
+
+```{r, fig.width=7, fig.height=5}
+DimPlot(MoMac.sub, label=TRUE, raster=FALSE)
+```
+
+No Blood
+
+```{r}
+table(MoMac$Tissue)
+Idents(MoMac) <- "Tissue"
+MoMac <- subset(MoMac, idents = "Blood", invert=TRUE)
+table(MoMac$Tissue)
+```
+
+
+# Load data from MNPverse
+
+```{r}
+MNPverse <- readRDS("/datastore/lucy/SynovialAtlas/CD1c/2021_MNP_Verse.RDS")
+```
+
+```{r}
+MNPverse
+```
+
+```{r}
+head(MNPverse@meta.data)
+```
+
+```{r}
+Idents(MNPverse) <- "Clusters"
+```
+
+```{r, fig.width=7, fig.height=5}
+DimPlot(MNPverse, label=TRUE, raster=FALSE) 
+```
+
+```{r, fig.width=20, fig.height=20}
+DimPlot(MNPverse, label=TRUE, raster=FALSE, split.by = "Clusters", ncol = 5) 
+```
+
+## Adjust MNPverse metadata
+
+```{r}
+MNPverse$Paper <- "MNP_verse"
+```
+
+```{r}
+MNPverse$Experiment <- paste0(MNPverse$Paper,"_",MNPverse$Study)
+```
+
+```{r}
+DimPlot(MNPverse, group.by = "Patient.No") + NoLegend()
+```
+
+```{r, fig.height=20}
+DimPlot(MNPverse, split.by = "Patient.No", ncol = 5) + NoLegend()
+```
+
+```{r}
+MNPverse$Unique_ID <- MNPverse$Patient.No
+```
+
+```{r}
+DefaultAssay(MNPverse) <- "RNA"
+```
+
+```{r}
+table(Idents(MNPverse))
+```
+
+```{r}
+MNPverse.sub <- subset(MNPverse, downsample=1000)
+```
+
+```{r, fig.width=7, fig.height=5}
+DimPlot(MNPverse, label=TRUE, raster=FALSE)
+```
+
+```{r, fig.width=7, fig.height=5}
+DimPlot(MNPverse.sub, label=TRUE, raster=FALSE)
+```
+
+No Blood
+
+```{r}
+table(MNPverse$Tissue)
+Idents(MNPverse) <- "Tissue"
+MNPverse <- subset(MNPverse, idents = "Blood", invert=TRUE)
+table(MNPverse$Tissue)
+```
+
+# CosMx object with all annotated
+
+```{r}
+CosMx = readRDS("/datastore/lucy/CosMx/sc.syno.seurat.cosmx.panel.rds")
+```
+
+```{r, fig.width=20}
+CosMx
+DimPlot(CosMx, label = T, repel = T)
+```
+
+```{r}
+table(CosMx$cosmx.dct)
+```
+
+```{r, fig.width=20}
+DimPlot(CosMx, group.by = "cosmx.dct", label = T, repel = T)
+```
+
+```{r}
+Idents(CosMx) <- "cosmx.dct"
+CosMx.subset = subset(CosMx, idents = c("DC2 CD1c+","DC2 CCR7+","DC3 CD1clowCD163+","iDC3 CD14highCD163+","FOLR2highCLEC10A+ STM","STM"))
+DimPlot(CosMx.subset)
+DimPlot(CosMx.subset, split.by = "cosmx.dct")
+table(CosMx.subset$cosmx.dct)
+```
+
+```{r}
+DimPlot(CosMx.subset, split.by = "Experiment")
+```
+
+```{r}
+table(CosMx.subset$cosmx.clusters)
+```
+
+```{r}
+DimPlot(CosMx.subset, group.by = "cosmx.clusters")
+```
+
+```{r, fig.width=20}
+DimPlot(CosMx.subset, group.by = "cosmx.clusters", split.by = "cosmx.clusters", ncol = 4)
+```
+
+##DE
+
+```{r}
+Idents(CosMx.subset) <- "cosmx.clusters"
+CosMx.subset@misc$markers = FindAllMarkers(CosMx.subset, min.pct = 0.4, logfc.threshold = 0.8, test.use = "MAST", only.pos = T)
+```
+
+```{r}
+CosMx.subset.heatmap <- subset(CosMx.subset, downsample=500)
+CosMx.subset.heatmap <- ScaleData(CosMx.subset.heatmap, features = rownames(CosMx.subset.heatmap))
+top.genes <- CosMx.subset@misc$markers %>% group_by(cluster) %>% top_n(n = 50, wt = avg_log2FC)
+DoHeatmap(CosMx.subset.heatmap, features = top.genes$gene) + NoLegend()
+```
+
+```{r, fig.height=20}
+avgexp.ST = AverageExpression(CosMx.subset, return.seurat = T)
+avgexp.ST <- ScaleData(avgexp.ST, features = rownames(avgexp.ST))
+DoHeatmap(object = avgexp.ST, features = top.genes$gene, draw.lines = F)
+```
+
+```{r, fig.height=60}
+DoHeatmap(object = avgexp.ST, features = top.genes$gene, draw.lines = F)
+```
+
+```{r, fig.width=10}
+DoHeatmap(object = avgexp.ST, features = c("CD1C","CLEC10A","CD14","FOLR2","RPS5","CFLAR","PTPN1","SPP1","S100A12"), draw.lines = F) + NoLegend()
+```
+
+```{r}
+Idents(CosMx.subset) <- "cosmx.clusters"
+table(CosMx.subset$cosmx.clusters)
+```
+
+```{r}
+CosMx.subset2 = subset(CosMx.subset, downsample = 450)
+DimPlot(CosMx.subset2)
+DimPlot(CosMx.subset2, split.by = "cosmx.dct", ncol = 3)
+table(CosMx.subset2$cosmx.dct)
+```
+
+```{r}
+DimPlot(CosMx.subset2, split.by = "Experiment")
+```
+
+```{r}
+CosMx.subset2@misc$markers = FindAllMarkers(CosMx.subset2, min.pct = 0.35, logfc.threshold = 0.7, test.use = "MAST", only.pos = T)
+```
+
+```{r}
+#CosMx.subset.heatmap <- subset(CosMx.subset2, downsample=1000)
+CosMx.subset2 <- ScaleData(CosMx.subset2, features = rownames(CosMx.subset2))
+top.genes <- CosMx.subset2@misc$markers %>% group_by(cluster) %>% top_n(n = 50, wt = avg_log2FC)
+DoHeatmap(CosMx.subset2, features = top.genes$gene) + NoLegend()
+```
+
+```{r, fig.height=20}
+avgexp.ST = AverageExpression(CosMx.subset, return.seurat = T)
+avgexp.ST <- ScaleData(avgexp.ST, features = rownames(avgexp.ST))
+DoHeatmap(object = avgexp.ST, features = top.genes$gene, draw.lines = F)
+```
+
+# Score MNPverse
+
+```{r}
+unique(CosMx.subset@misc$markers$cluster)
+mreg.genes = CosMx.subset@misc$markers[CosMx.subset@misc$markers$cluster == "DC2 CCR7+",]
+mreg.genes = unique(mreg.genes$gene)
+mreg.genes
+iDC3.genes = CosMx.subset@misc$markers[CosMx.subset@misc$markers$cluster == "iDC3 CD14highCD163+",]
+iDC3.genes = unique(iDC3.genes$gene)
+iDC3.genes
+CLEC10.genes = CosMx.subset@misc$markers[CosMx.subset@misc$markers$cluster == "FOLR2highCLEC10A+ STM",]
+CLEC10.genes = unique(CLEC10.genes$gene)
+CLEC10.genes
+```
+
+```{r}
+length(mreg.genes)
+length(intersect(mreg.genes, rownames(MNPverse)))
+length(iDC3.genes)
+length(intersect(iDC3.genes, rownames(MNPverse)))
+length(CLEC10.genes)
+length(intersect(CLEC10.genes, rownames(MNPverse)))
+```
+
+```{r}
+Idents(MNPverse) <- "Clusters"
+```
+
+
+```{r}
+MNPverse <- AddModuleScore(object = MNPverse, features = list(intersect(mreg.genes, rownames(MNPverse))), ctrl = length(mreg.genes), name = 'mReg_score_all')
+```
+
+```{r}
+MNPverse <- AddModuleScore(object = MNPverse, features = list(intersect(iDC3.genes, rownames(MNPverse))), ctrl = length(iDC3.genes), name = 'iDC3_score_all')
+```
+
+```{r}
+MNPverse <- AddModuleScore(object = MNPverse, features = list(intersect(CLEC10.genes, rownames(MNPverse))), ctrl = length(CLEC10.genes), name = 'CLEC10A_score_all')
+```
+
+### Score from genes DE with all cells
+
+```{r, fig.width=20}
+VlnPlot(MNPverse, features = c('mReg_score_all1','iDC3_score_all1'), pt.size = 0, ncol = 2)
+VlnPlot(MNPverse, features = c('mReg_score_all1','iDC3_score_all1'), pt.size = 0.5, ncol = 2)
+VlnPlot.median(MNPverse, features = c('mReg_score_all1','iDC3_score_all1'), ncol = 2, legend = FALSE)
+FeaturePlot(MNPverse, features = c('mReg_score_all1','iDC3_score_all1'), order = T)
+DimPlot(MNPverse, label = T, repel = T)
+DimPlot(MNPverse, split.by = "Clusters", ncol = 4)
+Nebulosa::plot_density(MNPverse, c("mReg_score_all1", 'iDC3_score_all1'), reduction = "umap")
+```
+
+### Score from genes DE with equal n of cells
+
+```{r}
+unique(CosMx.subset2@misc$markers$cluster)
+mreg.genes = CosMx.subset2@misc$markers[CosMx.subset2@misc$markers$cluster == "DC2 CCR7+",]
+mreg.genes = unique(mreg.genes$gene)
+mreg.genes
+iDC3.genes = CosMx.subset2@misc$markers[CosMx.subset2@misc$markers$cluster == "iDC3 CD14highCD163+",]
+iDC3.genes = unique(iDC3.genes$gene)
+iDC3.genes
+CLEC10.genes = CosMx.subset2@misc$markers[CosMx.subset2@misc$markers$cluster == "FOLR2highCLEC10A+ STM",]
+CLEC10.genes = unique(CLEC10.genes$gene)
+CLEC10.genes
+S100.genes = CosMx.subset2@misc$markers[CosMx.subset2@misc$markers$cluster == "CD14highS100A12+ monoSTM",]
+S100.genes = unique(S100.genes$gene)
+S100.genes
+```
+
+```{r}
+length(mreg.genes)
+length(intersect(mreg.genes, rownames(MNPverse)))
+length(iDC3.genes)
+length(intersect(iDC3.genes, rownames(MNPverse)))
+length(CLEC10.genes)
+length(intersect(CLEC10.genes, rownames(MNPverse)))
+length(S100.genes)
+length(intersect(S100.genes, rownames(MNPverse)))
+```
+
+```{r}
+MNPverse <- AddModuleScore(object = MNPverse, features = list(intersect(mreg.genes, rownames(MNPverse))), ctrl = length(mreg.genes), name = 'mReg_score')
+```
+
+```{r}
+MNPverse <- AddModuleScore(object = MNPverse, features = list(intersect(iDC3.genes, rownames(MNPverse))), ctrl = length(iDC3.genes), name = 'iDC3_score')
+```
+
+```{r}
+MNPverse <- AddModuleScore(object = MNPverse, features = list(intersect(CLEC10.genes, rownames(MNPverse))), ctrl = length(CLEC10.genes), name = 'CLEC10A_score')
+```
+
+```{r}
+MNPverse <- AddModuleScore(object = MNPverse, features = list(intersect(S100.genes, rownames(MNPverse))), ctrl = length(CLEC10.genes), name = 'S100A12_score')
+```
+
+```{r, fig.width=20}
+VlnPlot(MNPverse, features = c('mReg_score1','iDC3_score1'), pt.size = 0, ncol = 2)
+VlnPlot(MNPverse, features = c('mReg_score1','iDC3_score1'), pt.size = 0.5, ncol = 2)
+VlnPlot.median(MNPverse, features = c('mReg_score1','iDC3_score1'), ncol = 2, legend = FALSE)
+FeaturePlot(MNPverse, features = c('mReg_score1','iDC3_score1'), order = T)
+DimPlot(MNPverse, label = T, repel = T)
+DimPlot(MNPverse, split.by = "Clusters", ncol = 4)
+Nebulosa::plot_density(MNPverse, c("mReg_score1", 'iDC3_score1'), reduction = "umap")
+```
+
+```{r}
+VlnPlot.median(MNPverse, features = c('mReg_score1'), ncol = 2, legend = FALSE)
+```
+
+
+```{r, fig.width=20}
+VlnPlot(MNPverse, features = c('S100A12_score1','iDC3_score1'), pt.size = 0, ncol = 2)
+VlnPlot(MNPverse, features = c('S100A12_score1','iDC3_score1'), pt.size = 0.5, ncol = 2)
+VlnPlot.median(MNPverse, features = c('S100A12_score1','iDC3_score1'), ncol = 2, legend = FALSE)
+FeaturePlot(MNPverse, features = c('S100A12_score1','iDC3_score1'), order = T)
+DimPlot(MNPverse, label = T, repel = T)
+Nebulosa::plot_density(MNPverse, c("S100A12_score1", 'iDC3_score1'), reduction = "umap")
+```
+
+# Score MoMac
+
+```{r}
+unique(CosMx.subset@misc$markers$cluster)
+mreg.genes = CosMx.subset@misc$markers[CosMx.subset@misc$markers$cluster == "DC2 CCR7+",]
+mreg.genes = unique(mreg.genes$gene)
+mreg.genes
+iDC3.genes = CosMx.subset@misc$markers[CosMx.subset@misc$markers$cluster == "iDC3 CD14highCD163+",]
+iDC3.genes = unique(iDC3.genes$gene)
+iDC3.genes
+CLEC10.genes = CosMx.subset@misc$markers[CosMx.subset@misc$markers$cluster == "FOLR2highCLEC10A+ STM",]
+CLEC10.genes = unique(CLEC10.genes$gene)
+CLEC10.genes
+ATF.genes = CosMx.subset@misc$markers[CosMx.subset@misc$markers$cluster == "CLEC10A+ATF3+ STM",]
+ATF.genes = unique(ATF.genes$gene)
+ATF.genes
+```
+
+```{r}
+length(mreg.genes)
+length(intersect(mreg.genes, rownames(MNPverse)))
+length(iDC3.genes)
+length(intersect(iDC3.genes, rownames(MNPverse)))
+length(CLEC10.genes)
+length(intersect(CLEC10.genes, rownames(MNPverse)))
+length(ATF.genes)
+length(intersect(ATF.genes, rownames(MNPverse)))
+```
+
+```{r}
+Idents(MoMac) <- "Clusters"
+```
+
+### Score from genes DE with all cells
+
+```{r}
+MoMac <- AddModuleScore(object = MoMac, features = list(intersect(mreg.genes, rownames(MoMac))), ctrl = length(mreg.genes), name = 'mReg_score_all')
+```
+
+```{r}
+MoMac <- AddModuleScore(object = MoMac, features = list(intersect(iDC3.genes, rownames(MoMac))), ctrl = length(iDC3.genes), name = 'iDC3_score_all')
+```
+
+```{r}
+MoMac <- AddModuleScore(object = MoMac, features = list(intersect(CLEC10.genes, rownames(MoMac))), ctrl = length(CLEC10.genes), name = 'CLEC10A_score_all')
+```
+
+```{r}
+MoMac <- AddModuleScore(object = MoMac, features = list(intersect(ATF.genes, rownames(MoMac))), ctrl = length(CLEC10.genes), name = 'ATF_score_all')
+```
+
+```{r, fig.width=20}
+VlnPlot(MoMac, features = c('mReg_score_all1','iDC3_score_all1'), pt.size = 0, ncol = 2)
+VlnPlot(MoMac, features = c('mReg_score_all1','iDC3_score_all1'), pt.size = 0.5, ncol = 2)
+VlnPlot.median(MoMac, features = c('mReg_score_all1','iDC3_score_all1'), ncol = 2, legend = FALSE)
+FeaturePlot(MoMac, features = c('mReg_score_all1','iDC3_score_all1'), order = T)
+DimPlot(MoMac, label = T, repel = T)
+DimPlot(MoMac, split.by = "Clusters", ncol = 4)
+Nebulosa::plot_density(MoMac, c("mReg_score_all1", 'iDC3_score_all1'), reduction = "umap")
+```
+
+```{r, fig.width=20}
+VlnPlot(MoMac, features = c('CLEC10A_score_all1','iDC3_score_all1'), pt.size = 0, ncol = 2)
+VlnPlot(MoMac, features = c('CLEC10A_score_all1','iDC3_score_all1'), pt.size = 0.5, ncol = 2)
+VlnPlot.median(MoMac, features = c('CLEC10A_score_all1','iDC3_score_all1'), ncol = 2, legend = FALSE)
+FeaturePlot(MoMac, features = c('CLEC10A_score_all1','iDC3_score_all1'), order = T)
+DimPlot(MoMac, label = T, repel = T)
+DimPlot(MoMac, split.by = "Clusters", ncol = 4)
+Nebulosa::plot_density(MoMac, c("CLEC10A_score_all1", 'iDC3_score_all1'), reduction = "umap")
+```
+
+### Score from genes DE with equal n of cells
+
+```{r}
+unique(CosMx.subset2@misc$markers$cluster)
+mreg.genes = CosMx.subset2@misc$markers[CosMx.subset2@misc$markers$cluster == "DC2 CCR7+",]
+mreg.genes = unique(mreg.genes$gene)
+mreg.genes
+iDC3.genes = CosMx.subset2@misc$markers[CosMx.subset2@misc$markers$cluster == "iDC3 CD14highCD163+",]
+iDC3.genes = unique(iDC3.genes$gene)
+iDC3.genes
+CLEC10.genes = CosMx.subset2@misc$markers[CosMx.subset2@misc$markers$cluster == "FOLR2highCLEC10A+ STM",]
+CLEC10.genes = unique(CLEC10.genes$gene)
+CLEC10.genes
+S100.genes = CosMx.subset2@misc$markers[CosMx.subset2@misc$markers$cluster == "CD14highS100A12+ monoSTM",]
+S100.genes = unique(S100.genes$gene)
+S100.genes
+ATF.genes = CosMx.subset2@misc$markers[CosMx.subset2@misc$markers$cluster == "CLEC10A+ATF3+ STM",]
+ATF.genes = unique(ATF.genes$gene)
+ATF.genes
+DC2.genes = CosMx.subset2@misc$markers[CosMx.subset2@misc$markers$cluster == "DC2 CD1c+",]
+DC2.genes = unique(DC2.genes$gene)
+DC2.genes
+DC3.genes = CosMx.subset2@misc$markers[CosMx.subset2@misc$markers$cluster == "DC3 CD1clowCD163+",]
+DC3.genes = unique(DC3.genes$gene)
+DC3.genes
+```
+
+```{r}
+length(mreg.genes)
+length(intersect(mreg.genes, rownames(MoMac)))
+length(iDC3.genes)
+length(intersect(iDC3.genes, rownames(MoMac)))
+length(CLEC10.genes)
+length(intersect(CLEC10.genes, rownames(MoMac)))
+length(S100.genes)
+length(intersect(S100.genes, rownames(MoMac)))
+length(ATF.genes)
+length(intersect(ATF.genes, rownames(MoMac)))
+length(DC2.genes)
+length(intersect(DC2.genes, rownames(MoMac)))
+length(DC3.genes)
+length(intersect(DC3.genes, rownames(MoMac)))
+```
+
+```{r}
+MoMac <- AddModuleScore(object = MoMac, features = list(intersect(mreg.genes, rownames(MoMac))), ctrl = length(mreg.genes), name = 'mReg_score')
+```
+
+```{r}
+MoMac <- AddModuleScore(object = MoMac, features = list(intersect(iDC3.genes, rownames(MoMac))), ctrl = length(iDC3.genes), name = 'iDC3_score')
+```
+
+```{r}
+MoMac <- AddModuleScore(object = MoMac, features = list(intersect(CLEC10.genes, rownames(MoMac))), ctrl = length(CLEC10.genes), name = 'CLEC10A_score')
+```
+
+```{r}
+MoMac <- AddModuleScore(object = MoMac, features = list(intersect(S100.genes, rownames(MoMac))), ctrl = length(CLEC10.genes), name = 'S100A12_score')
+```
+
+```{r}
+MoMac <- AddModuleScore(object = MoMac, features = list(intersect(ATF.genes, rownames(MoMac))), ctrl = length(ATF.genes), name = 'ATF_score')
+```
+
+```{r}
+MoMac <- AddModuleScore(object = MoMac, features = list(intersect(DC2.genes, rownames(MoMac))), ctrl = length(DC2.genes), name = 'DC2_score')
+```
+
+```{r}
+MoMac <- AddModuleScore(object = MoMac, features = list(intersect(DC3.genes, rownames(MoMac))), ctrl = length(DC3.genes), name = 'DC3_score')
+```
+
+```{r, fig.width=20}
+VlnPlot(MoMac, features = c('mReg_score1','iDC3_score1'), pt.size = 0, ncol = 2)
+VlnPlot(MoMac, features = c('mReg_score1','iDC3_score1'), pt.size = 0.5, ncol = 2)
+VlnPlot.median(MoMac, features = c('mReg_score1','iDC3_score1'), ncol = 2, legend = FALSE)
+FeaturePlot(MoMac, features = c('mReg_score1','iDC3_score1'), order = T)
+DimPlot(MoMac, label = T, repel = T)
+DimPlot(MoMac, split.by = "Clusters", ncol = 4)
+Nebulosa::plot_density(MoMac, c("mReg_score1", 'iDC3_score1'), reduction = "umap")
+```
+
+```{r}
+FeaturePlot(MoMac, "CLEC10A", order=TRUE)
+VlnPlot.median(MoMac, "CLEC10A") + NoLegend()
+VlnPlot(MoMac, "CLEC10A", pt.size = 0.5) + NoLegend()
+plot_density(MoMac, "CLEC10A", reduction = "umap")
+```
+
+```{r, fig.width=10}
+DimPlot(MoMac, split.by = "Clusters", ncol = 3)
+```
+
+```{r, fig.width=20}
+VlnPlot(MoMac, features = c('S100A12_score1','CLEC10A_score1'), pt.size = 0, ncol = 2)
+VlnPlot(MoMac, features = c('S100A12_score1','CLEC10A_score1'), pt.size = 0.5, ncol = 2)
+VlnPlot.median(MoMac, features = c('S100A12_score1','CLEC10A_score1'), ncol = 2, legend = FALSE)
+FeaturePlot(MoMac, features = c('S100A12_score1','CLEC10A_score1'), order = T)
+DimPlot(MoMac, label = T, repel = T)
+Nebulosa::plot_density(MoMac, c("S100A12_score1", 'CLEC10A_score1'), reduction = "umap")
+```
+
+```{r, fig.width=20}
+VlnPlot(MoMac, features = c('ATF_score1','CLEC10A_score1'), pt.size = 0, ncol = 2)
+VlnPlot(MoMac, features = c('ATF_score1','CLEC10A_score1'), pt.size = 0.5, ncol = 2)
+VlnPlot.median(MoMac, features = c('ATF_score1','CLEC10A_score1'), ncol = 2, legend = FALSE)
+FeaturePlot(MoMac, features = c('ATF_score1','CLEC10A_score1'), order = T)
+DimPlot(MoMac, label = T, repel = T)
+Nebulosa::plot_density(MoMac, c("ATF_score1", 'CLEC10A_score1'), reduction = "umap")
+```
+
+```{r, fig.width=20}
+VlnPlot(MoMac, features = c('DC2_score1','DC3_score1'), pt.size = 0, ncol = 2)
+VlnPlot(MoMac, features = c('DC2_score1','DC3_score1'), pt.size = 0.5, ncol = 2)
+VlnPlot.median(MoMac, features = c('DC2_score1','DC3_score1'), ncol = 2, legend = FALSE)
+FeaturePlot(MoMac, features = c('DC2_score1','DC3_score1'), order = T)
+DimPlot(MoMac, label = T, repel = T)
+Nebulosa::plot_density(MoMac, c('DC2_score1','DC3_score1'), reduction = "umap")
+```
+
+```{r, fig.width=20}
+VlnPlot(MoMac, features = c('S100A12_score1','iDC3_score1'), pt.size = 0, ncol = 2)
+VlnPlot(MoMac, features = c('S100A12_score1','iDC3_score1'), pt.size = 0.5, ncol = 2)
+VlnPlot.median(MoMac, features = c('S100A12_score1','iDC3_score1'), ncol = 2, legend = FALSE)
+FeaturePlot(MoMac, features = c('S100A12_score1','iDC3_score1'), order = T)
+DimPlot(MoMac, label = T, repel = T)
+DimPlot(MoMac, split.by = "Clusters", ncol = 4)
+Nebulosa::plot_density(MoMac, c("S100A12_score1", 'iDC3_score1'), reduction = "umap")
+```
+
+```{r, fig.width=15, fig.height=7}
+DimPlot(MoMac, label = T, repel = T)
+plot_density(MoMac, c("C5AR1","FCAR","FLT3"), reduction = "umap")
+DimPlot(MNPverse, label = T, repel = T)
+plot_density(MNPverse, c("C5AR1","FCAR","FLT3"), reduction = "umap")
+```
+
+```{r, fig.width=15}
+VlnPlot.median(MoMac, c("C5AR1","FCAR","FLT3"), legend = F) 
+VlnPlot.median(MNPverse, c("C5AR1","FCAR","FLT3"), legend = F)
+VlnPlot(MoMac, c("C5AR1","FCAR","FLT3"), pt.size = 0.1) + NoLegend() 
+VlnPlot(MNPverse, c("C5AR1","FCAR","FLT3"), pt.size = 0.1) + NoLegend()
+```
+
+
+# Save
+
+```{r}
+write.csv(CosMx.subset2@misc$markers, "/datastore/Dom/MNPverse/DE_genes_for_score.csv")
+saveRDS(MoMac, "/datastore/Dom/MNPverse/MoMac_scored.rds")
+saveRDS(MNPverse, "/datastore/Dom/MNPverse/MNPverse_scored.rds ")
+```
+
+```{r, fig.width=15}
+DimPlot(MoMac, split.by = "Clusters")
+```
+
+# Plots
+
+```{r}
+dc.only <- readRDS("/datastore/lucy/SynovialAtlas/CD1c/dc.only.rds")
+```
+
+```{r}
+MNPverse.score <- readRDS("/datastore/Dom/MNPverse/MNPverse_scored.rds ")
+```
+
+```{r}
+MNPverse.int.DC = readRDS("/datastore/Dom/MNPverse/RA_dc.only_MNPverse_tetha10.rds")
+MNPverse.int.myeloid = readRDS("/datastore/Dom/MNPverse/RA_myeloid_VS_MNPverse_tetha10.rds")
+```
+
+```{r}
+DimPlot(MNPverse.int.DC)
+DimPlot(MNPverse.int.DC, split.by = "Paper")
+DimPlot(MNPverse.int.DC, group.by = "all.myeloid.clusters", split.by = "Paper")
+```
+```{r}
+table(MNPverse.int.DC$all.myeloid.clusters)
+```
+
+
+```{r}
+DimPlot(MNPverse.int.myeloid)
+DimPlot(MNPverse.int.myeloid, split.by = "Paper")
+DimPlot(MNPverse.int.myeloid, group.by = "all.myeloid.clusters", split.by = "Paper")
+```
+
+```{r, fig.width=12}
+DimPlot(MNPverse.int.myeloid$, group.by = "all.myeloid.clusters", split.by = "Paper")
+```
+
+```{r}
+dc.only
+```
+
+```{r}
+dc.cols <- c("#7FCDF3", "#00689A","#0ec2a2","#43f782",
+  "#a6ffef","#e5befb","#C876F7","#fdf0bb","#faf771","#fae071","#F8A640","#e38208","#FF6C67","#FF070A","#ce0062","#f776e6")
+
+dc.only$clusters <- as.ordered(factor(dc.only$clusters, 
+                                      levels=c('pre-DC CD5+AXL+SIGLEC6+',
+                                               'DC1 CLEC9A+ (infiltrating)',
+                                               'DC2 CD1c++AXL+',
+                                               'DC2 CD1c++KLF4+ATF3+MRC1+',
+                                                'DC2 CD1c++KLF4+ (infiltrating)',
+                                               'DC2 MIR155HG+CCR7+ (activated)',
+                                               'DC2 CCR7+LAMP3+ (migratory)',
+                                               'DC2/3 CD1c+CRIP1+ (transitional)',
+                                               "DC2/3 CD1c+ISG15+",
+                                               'DC3 CD1c+CD14-CD163+ (infiltrating)',
+                                               'DC3 CD1clowCD63+CD9+',
+                                               'DC3 CD1clowTUBB4B+TIMP1+',
+                                               'iDC3 CD1c-CD14lowCD163+ (infiltrating)',
+                                               'iDC3 CD1c-FABP5+SDS+',
+                                               'iDC3 CD1c-CLEC10A+FOLR2++C1QA+',
+                                              'iDC3 CD1c-CLEC10A+NR4A3+')))
+Idents(dc.only) <- "clusters"
+
+DimPlot(dc.only, cols=dc.cols, group.by="clusters")
+```
+
+```{r}
+unique(MNPverse.int.myeloid$clusters)
+```
+
+
+```{r}
+#Export annotations to dataframe
+myeloid.anno <- as.data.frame(MNPverse.int.myeloid$clusters)
+myeloid.anno$clusters <- myeloid.anno$`MNPverse.int.myeloid$clusters`
+myeloid.anno$`MNPverse.int.myeloid$clusters` <- NULL
+myeloid.anno$barcode<-rownames(myeloid.anno)
+head(myeloid.anno)
+```
+
+```{r}
+#Export annotations to dataframe
+dc.anno <- as.data.frame(dc.only$clusters)
+dc.anno$clusters <- dc.anno$`dc.only$clusters`
+dc.anno$`dc.only$clusters` <- NULL
+dc.anno$barcode<-rownames(dc.anno)
+head(dc.anno)
+```
+
+```{r}
+#Put myeloid and DC annotations together
+combined.anno <- left_join(myeloid.anno, dc.anno, by="barcode")
+head(combined.anno)
+```
+
+
+```{r}
+#Take DC annotation unless value is NA
+combined.anno$clusters <- ifelse(is.na(combined.anno$clusters.y), as.character(combined.anno$clusters.x), as.character(combined.anno$clusters.y))
+rownames(combined.anno) <- combined.anno$barcode
+head(combined.anno)
+```
+
+```{r}
+combined.anno$barcode <- NULL
+combined.anno$clusters.x <- NULL
+combined.anno$clusters.y <- NULL
+combined.anno$fine_clustering <- combined.anno$clusters
+combined.anno$clusters <- NULL
+head(combined.anno)
+```
+
+
+```{r}
+MNPverse.int.myeloid <- AddMetaData(MNPverse.int.myeloid, combined.anno)
+```
+
+```{r, fig.width=12}
+DimPlot(MNPverse.int.myeloid)
+DimPlot(MNPverse.int.myeloid, split.by = "Paper")
+DimPlot(MNPverse.int.myeloid, group.by = "fine_clustering", split.by = "Paper")
+DimPlot(MNPverse.int.myeloid, group.by = "fine_clustering", split.by = "Paper", repel = T, label = T) + NoLegend()
+```
+
+```{r, fig.width=20}
+DimPlot(MNPverse.int.myeloid, group.by = "fine_clustering", split.by = "Paper", repel = T, label = T) + NoLegend()
+DimPlot(MNPverse.int.myeloid, split.by = "fine_clustering", ncol = 4) + NoLegend()
+DimPlot(MNPverse.int.myeloid, group.by = "Clusters", split.by = "Paper", repel = T, label = T) + NoLegend()
+```
+
+```{r}
+Idents(MNPverse.int.myeloid) <- "Clusters"
+unique(MNPverse.int.myeloid$Clusters)
+mReg <- subset(MNPverse.int.myeloid, idents = "mregDC")
+DimPlot(mReg, split.by = "Paper")
+```
+
+```{r}
+MNPverse.int.myeloid$pANN_0.25_0.005_101 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.005_680 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.09_3 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.25_13 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.09_135 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.01_9 <- NULL
+```
+
+```{r}
+MNPverse.int.myeloid$pANN_0.25_0.005_291 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.24_11 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.12_2 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.03_9 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.22_29 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.28_305 <- NULL
+```
+
+```{r}
+MNPverse.int.myeloid$pANN_0.25_0.3_2 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.01_13 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.02_4 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.28_6 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.09_10 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.04_5 <- NULL
+```
+
+```{r}
+MNPverse.int.myeloid$pANN_0.25_0.005_744 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.04_2 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.26_6 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.09_1 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.005_86 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.23_447 <- NULL
+```
+
+```{r}
+MNPverse.int.myeloid$pANN_0.25_0.3_98 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.21_39 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.03_2 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.1_16 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.05_13 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.15_346 <- NULL
+```
+
+```{r}
+MNPverse.int.myeloid$pANN_0.25_0.01_39 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.05_15 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.27_454 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.09_662 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.26_674 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.12_500 <- NULL
+```
+
+```{r}
+MNPverse.int.myeloid$pANN_0.25_0.03_8 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.3_52 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.27_27 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.14_20 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.27_1 <- NULL
+MNPverse.int.myeloid$pANN_0.25_0.12_5 <- NULL
+```
+
+```{r}
+MNPverse.int.myeloid$pANN_0.25_0.04_4 <- NULL
+```
+
+```{r}
+MNPverse.int.myeloid$nCount_ADT <- NULL
+MNPverse.int.myeloid$nFeature_ADT <- NULL
+MNPverse.int.myeloid$Name.exp <- NULL
+MNPverse.int.myeloid$Tagging <- NULL
+MNPverse.int.myeloid$Exp <- NULL
+MNPverse.int.myeloid$HTO <- NULL
+
+MNPverse.int.myeloid$HTO_status <- NULL
+MNPverse.int.myeloid$SNP_cluster <- NULL
+MNPverse.int.myeloid$Sample_Tag <- NULL
+MNPverse.int.myeloid$RNA_snn_res.2 <- NULL
+MNPverse.int.myeloid$RNA_snn_res.1.5 <- NULL
+MNPverse.int.myeloid$RNA_snn_res.1.2 <- NULL
+MNPverse.int.myeloid$RNA_snn_res.1 <- NULL
+MNPverse.int.myeloid$RNA_snn_res.0.8 <- NULL
+MNPverse.int.myeloid$RNA_snn_res.0.6 <- NULL
+MNPverse.int.myeloid$RNA_snn_res.0.5 <- NULL
+MNPverse.int.myeloid$RNA_snn_res.0.1 <- NULL
+MNPverse.int.myeloid$integrated.clusters <- NULL
+MNPverse.int.myeloid$integrated.pb.clusters <- NULL
+
+MNPverse.int.myeloid$barcode <- NULL
+```
+
+```{r}
+DimPlot(MNPverse.int.myeloid, group.by = "seurat_clusters", label = T)
+```
+
+
+```{r}
+Idents(MNPverse.int.myeloid) <- "seurat_clusters"
+MNPverse.int.myeloid.13 = subset(MNPverse.int.myeloid, idents = "13")
+Idents(MNPverse.int.myeloid) <- "Paper"
+MNPverse.int.myeloid.13 = subset(MNPverse.int.myeloid, subset = Paper == "Elmesmari")
+```
+
+```{r}
+MNPverse.int.myeloid.13 = subset(MNPverse.int.DC, subset = Paper == "Elmesmari")
+```
+
+```{r}
+MNPverse.int.myeloid <- UpdateSeuratObject(MNPverse.int.myeloid)
+```
+
+
+```{r}
+Idents(MNPverse.int.myeloid) <- "Paper"
+unique(MNPverse.int.myeloid$Paper)
+
+mReg.aziza <- subset(MNPverse.int.myeloid, subset = Paper == "Elmesmari")
+
+Idents(MNPverse.int.myeloid) <- "fine_clustering"
+list.names = unique(MNPverse.int.myeloid$fine_clustering)
+n=length(list.names)-10
+mReg.aziza <- subset(MNPverse.int.myeloid, idents = list.names[1:n], invert=T)
+DimPlot(mReg.aziza, split.by = "Paper")
+```
+
+
+# Continue from here
+
+# Load data from MoMac
+
+```{r}
+MoMac <- readRDS("/datastore/lucy/SynovialAtlas/CD1c/2021_MoMac_VERSE.RDS")
+```
+
+```{r}
+MoMac
+```
+
+```{r}
+table(MoMac$Tissue)
+```
+
+
+```{r}
+head(MoMac@meta.data)
+```
+
+```{r}
+Idents(MoMac) <- "Clusters"
+```
+
+```{r, fig.width=7, fig.height=5}
+DimPlot(MoMac, label=TRUE, raster=FALSE) 
+```
+
+## Score
+
+```{r}
+MoMac <- AddModuleScore(object = MoMac, features = list(intersect(iDC3.genes, rownames(MoMac))), ctrl = length(iDC3.genes), name = 'iDC3_score')
+```
+
+```{r}
+MoMac <- AddModuleScore(object = MoMac, features = list(intersect(CLEC10.genes, rownames(MoMac))), ctrl = length(CLEC10.genes), name = 'CLEC10_score')
+```
+
+```{r, fig.width=20}
+VlnPlot(MoMac, features = c('CLEC10_score1','iDC3_score1'), pt.size = 0, ncol = 2)
+VlnPlot(MoMac, features = c('CLEC10_score1','iDC3_score1'), pt.size = 0.5, ncol = 2)
+VlnPlot.median(MoMac, features = c('CLEC10_score1','iDC3_score1'), ncol = 2, legend = FALSE)
+FeaturePlot(MoMac, features = c('CLEC10_score1','iDC3_score1'), order = T)
+DimPlot(MoMac, label = T, repel = T)
+```
+
+## Adjust MNPverse metadata
+
+```{r}
+MNPverse$Paper <- "MNP_verse"
+```
+
+```{r}
+MNPverse$Experiment <- paste0(MNPverse$Paper,"_",MNPverse$Study)
+```
+
+```{r}
+DimPlot(MNPverse, group.by = "Patients") + NoLegend()
+DimPlot(MNPverse, group.by = "Patient No") + NoLegend()
+```
+
+```{r, fig.height=20}
+DimPlot(MNPverse, split.by = "Patients", ncol = 5) + NoLegend()
+DimPlot(MNPverse, split.by = "Patient No", ncol = 5) + NoLegend()
+```
+
+```{r}
+#MNPverse$Unique_ID <- MNPverse$Patient.No
+MNPverse$Unique_ID <- MNPverse$`Patient No`
+```
+
+```{r}
+DefaultAssay(MNPverse) <- "RNA"
+```
+
+```{r}
+table(Idents(MNPverse))
+```
+
+```{r}
+MNPverse.sub <- subset(MNPverse, downsample=1000)
+```
+
+```{r, fig.width=7, fig.height=5}
+DimPlot(MNPverse, label=TRUE, raster=FALSE)
+```
+
+```{r, fig.width=7, fig.height=5}
+DimPlot(MNPverse.sub, label=TRUE, raster=FALSE)
+```
+
+
+
+
+
+
+# Integrated RA DC with MNPverse
+
+```{r}
+common.features <- intersect(rownames(dc.only), rownames(MNPverse))
+length(x = common.features)
+```
+
+```{r}
+# Merge based on common features only
+myeloid <- merge(dc.only[common.features, ], MNPverse[common.features, ])
+```
+
+```{r}
+#Identify median number of counts for scaling factor
+norm_value<-median(c(
+    median(colSums(dc.only@assays$RNA@counts[common.features, ])), 
+    median(colSums(MNPverse@assays$RNA@counts[common.features, ]))
+    ))
+norm_value
+#Continue with typical preprocessing pipeline
+myeloid <- myeloid %>%
+    NormalizeData(scale.factor = norm_value) %>%
+    FindVariableFeatures(selection.method = "vst", nfeatures = 2000) %>% 
+    ScaleData() %>% RunPCA()
+```
+
+```{r}
+#Preintegration
+myeloid <- RunUMAP(object = myeloid, reduction = "pca", dims = 1:40)
+```
+
+```{r, fig.width=10, fig.height=5}
+DimPlot(myeloid, group.by=c("Experiment"), raster=FALSE) 
+```
+
+### Harmonize
+
+```{r}
+table(myeloid$Unique_ID)
+table(myeloid$Experiment)
+table(myeloid$Tissue)
+table(myeloid$Platform)
+```
+
+
+```{r}
+myeloid <- myeloid %>% 
+   RunHarmony(group.by.vars=c("Unique_ID","Experiment","Tissue"), theta=c(0,10,0))
+```
+
+```{r}
+myeloid <- RunUMAP(object = myeloid, reduction = "harmony", dims = 1:40)
+myeloid <- FindNeighbors(object = myeloid, reduction = "harmony", dims = 1:40)
+```
+
+```{r}
+myeloid <- FindClusters(myeloid, res=0.5)
+```
+
+```{r, fig.width=10, fig.height=5}
+DimPlot(myeloid, group.by=c("Experiment"), raster=FALSE) 
+```
+
+```{r, fig.width=10, fig.height=5}
+DimPlot(myeloid, split.by=c("Paper"),raster=FALSE, label=TRUE) 
+```
+
+```{r, fig.width=15, fig.height=5}
+DimPlot(myeloid, group.by=c("Clusters"),raster=FALSE, label=TRUE) 
+```
+
+```{r, fig.width=20, fig.height=5}
+DimPlot(myeloid, group.by=c("Clusters"),raster=FALSE, split.by="Paper", label=FALSE) 
+```
+
+# Confusion Matrix
+
+```{r}
+library(ComplexHeatmap)
+h <- myeloid@meta.data %>%  
+    subset(Paper %in% "MNPverse") %>%   with(table(Clusters, seurat.clusters)) %>%  
+    prop.table(1) %>%  prop.table(2)
+h <- h[,which(colSums(h)!=0)] %>% Heatmap(name = "Freq",column_title = stringr::str_wrap("Confusion matrix of new clusters from integration vs MNPverse reference annotations", width = 35),   
+        width = 20*unit(5, "mm"),height = 20*unit(5, "mm"), 
+        # row_dend_side = "right",     
+        heatmap_legend_param = list(       legend_direction = "horizontal",       
+                                    legend_width = unit(6, "cm")     )   ) 
+options(repr.plot.width=7, repr.plot.height=7)
+        draw(h, heatmap_legend_side = "bottom")
+```
+
+```{r}
+saveRDS(myeloid, "/datastore/Dom/MNPverse/RA_myeloid_VS_MoMacverse_tetha10.rds")
+```
+
+```{r}
+myeloid <- readRDS("myeloid.MoMacVerse.PB.ST.rds")
+```
+
